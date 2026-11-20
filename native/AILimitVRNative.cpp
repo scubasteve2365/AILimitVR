@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.3.0"
-#define MOD_BUILD 3
+#define MOD_VERSION "0.4.0"
+#define MOD_BUILD 4
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -44,15 +44,16 @@ static void Log(const char* fmt, ...) {
 
 // ---------------------------------------------------------------- settings (AILimitVR\AILimitVR.ini)
 struct Settings {
-    float resolution = 1.0f;
+    float resolution = 0.95f;   // defaults: Steve's RigA settings at the gate (2026-11-20)
     int picture = 0;            // 0 Auto, 1 Steady, 2 Panel
     int hudMode = 0;            // 0 Fixed, 1 Follows head, 2 Hidden
-    float hudWidth = 1.6f, hudX = 0.0f, hudY = -0.05f, hudDistance = 1.6f;
+    float hudWidth = 1.85f, hudX = 0.0f, hudY = -0.17f, hudDistance = 1.25f;
     float menuSize = 1.0f, menuHeight = 0.0f, menuDistance = 0.9f;
     int blockNetwork = 1;       // the game's internet connections are refused and logged
     float worldScale = 1.0f;    // game metres per real metre of head movement and eye gap (1 life size, higher: smaller world, more depth)
     int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
     float lockOnLift = 0;       // lock-on marker raised by this many screen pixels
+    int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down (Steve, 2026-11-20)
 };
 static Settings g_set;
 static std::wstring IniPath() { return g_gameDir + L"AILimitVR\\AILimitVR.ini"; }
@@ -64,18 +65,18 @@ static void IniW(const wchar_t* sec, const wchar_t* key, float v) {
     wchar_t b[64]; swprintf_s(b, L"%g", v); WritePrivateProfileStringW(sec, key, b, IniPath().c_str());
 }
 static void LoadSettings() {
-    g_set.resolution = IniF(L"VR", L"Resolution", 1.0f);
-    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 0);
+    g_set.resolution = IniF(L"VR", L"Resolution", 0.95f);
+    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 0); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1);
     g_set.picture = (int)IniF(L"VR", L"Picture", 0);
     g_set.hudMode = (int)IniF(L"HUD", L"Mode", 0);
-    g_set.hudWidth = IniF(L"HUD", L"Size", 1.6f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
-    g_set.hudY = IniF(L"HUD", L"Height", -0.05f); g_set.hudDistance = IniF(L"HUD", L"Distance", 1.6f);
+    g_set.hudWidth = IniF(L"HUD", L"Size", 1.85f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
+    g_set.hudY = IniF(L"HUD", L"Height", -0.17f); g_set.hudDistance = IniF(L"HUD", L"Distance", 1.25f);
     g_set.menuSize = IniF(L"Menu", L"Size", 1.0f); g_set.menuHeight = IniF(L"Menu", L"Height", 0.0f); g_set.menuDistance = IniF(L"Menu", L"Distance", 0.9f);
     g_set.blockNetwork = (int)IniF(L"Network", L"Block", 1);
 }
 static void SaveSettings() {
     IniW(L"VR", L"Resolution", g_set.resolution); IniW(L"VR", L"Picture", (float)g_set.picture);
-    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift);
+    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift); IniW(L"VR", L"DecoupledPitch", (float)g_set.decoupledPitch);
     IniW(L"HUD", L"Mode", (float)g_set.hudMode); IniW(L"HUD", L"Size", g_set.hudWidth); IniW(L"HUD", L"X", g_set.hudX);
     IniW(L"HUD", L"Height", g_set.hudY); IniW(L"HUD", L"Distance", g_set.hudDistance);
     IniW(L"Menu", L"Size", g_set.menuSize); IniW(L"Menu", L"Height", g_set.menuHeight); IniW(L"Menu", L"Distance", g_set.menuDistance);
@@ -499,6 +500,7 @@ static void PollCommands() {
         else if (c == "recenter") aixr::Recenter();
         else if (c == "gamesettings") LogGameSet("asked");
         else if (c == "dumpui") g_wantDumpUi = true;
+        else if (c == "pitch") { int v; ls >> v; g_set.decoupledPitch = v; Log("PITCH decoupled %d (lab)", v); }
         else if (c == "menu") { menu::g_open = !menu::g_open; Log("MENU %s (lab)", menu::g_open ? "opened" : "closed"); }
         else if (c == "hud") { int n; ls >> n; g_set.hudMode = n; menu::PushHud(); }
         else Log("CMD unknown");
@@ -571,6 +573,13 @@ static void PoseEyes(Il2CppObject* game) {
     Il2CppObject* tr = Transform(game);
     Vec3 cp = P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(tr, mTrPos);
     Quat cr = P<Quat (*)(Il2CppObject*, MethodInfo*)>(mTrRot)(tr, mTrRot);
+    if (g_set.decoupledPitch) {
+        // Decoupled pitch: keep only the game camera's heading (yaw). Its pitch and roll (stick tilt, lock-on tilt,
+        // shake roll) no longer tilt the world; the player looks up and down with the head. The camera position is kept.
+        Vec3 f = QRot(cr, Vec3{0, 0, 1});
+        float yaw = atan2f(f.x, f.z);
+        cr = Quat{0, sinf(yaw * 0.5f), 0, cosf(yaw * 0.5f)};
+    }
     float n = IF(mCamGetNear, game), f = IF(mCamGetFar, game);
     bool tracked = v.valid && v.recenters && !g_eyeCheck;
     for (int e = 0; e < 2; e++) {
