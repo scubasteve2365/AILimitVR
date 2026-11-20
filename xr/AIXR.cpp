@@ -5,7 +5,7 @@
 #include "AIXR.h"
 #include "MenuDraw.h"
 #include <windows.h>
-#include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <atomic>
@@ -134,6 +134,11 @@ static bool CreateDeviceForRuntime(const LUID& want) {
     HRESULT hr = D3D11CreateDevice(chosen, chosen ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);
     if (chosen) chosen->Release();
     if (FAILED(hr)) { Log("XR device creation failed %08lx", (unsigned long)hr); return false; }
+    // The runtime may use this device's immediate context from its own threads (Virtual Desktop's submit path does
+    // d3d11 work inside xrEndFrame and crashed on Steve's Quest 3 with a freed pointer): serialise every call on it.
+    ID3D11Multithread* mt = nullptr;
+    if (SUCCEEDED(g_ctx->QueryInterface(__uuidof(ID3D11Multithread), (void**)&mt)) && mt) { BOOL was = mt->SetMultithreadProtected(TRUE); mt->Release(); Log("XR device multithread protection on (was %d)", was); }
+    else Log("XR device multithread protection NOT available");
     return true;
 }
 
@@ -618,7 +623,9 @@ static bool DrawQuad(Swap& s, ID3D11ShaderResourceView* srv, const float pose[7]
 
 static void XrThread() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    SetThreadDescription(GetCurrentThread(), L"AILimitVR XR");
     QueryPerformanceFrequency(&g_qpf);
+    Log("XR thread %lu started", GetCurrentThreadId());
     g_state = Starting;
     if (!StartXr()) { g_state = Failed; Log("XR VR DID NOT START, error %d. The game runs flat.", (int)g_lastError); return; }
     bool running = false;

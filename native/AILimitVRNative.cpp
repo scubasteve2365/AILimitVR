@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.4.3"
-#define MOD_BUILD 43
+#define MOD_VERSION "0.4.4"
+#define MOD_BUILD 44
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
