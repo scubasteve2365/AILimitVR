@@ -56,6 +56,22 @@ int RecommendedHeight() { return g_recH; }
 int LayerInUse() { return g_layerInUse; }
 int LastError() { return g_lastError; }
 void Recenter() { g_wantRecenter = true; }
+static bool IsVd() { return strstr(g_runtime, "VirtualDesktop") || strstr(g_runtime, "Virtual Desktop"); }
+void SetPicture(int picture) {
+    g_picture = picture;
+    if (g_layerInUse < 0) return;  // chosen at start
+    bool steady = picture == 1 || (picture == 0 && IsVd());
+    g_layerInUse = steady ? 1 : 0;
+    Log("XR PICTURE setting %s (menu), runtime \"%s\", flat panels %s", picture == 1 ? "Steady" : picture == 2 ? "Panel" : "Auto", g_runtime, steady ? "drawn into the eyes (Steady, projection)" : "quad layers (Panel)");
+}
+const char* LastErrorName() {
+    switch (g_lastError) {
+        case -51: return "XR_ERROR_RUNTIME_UNAVAILABLE"; case -32: return "XR_ERROR_FILE_ACCESS_ERROR"; case -2: return "XR_ERROR_RUNTIME_FAILURE";
+        case -6: return "XR_ERROR_API_VERSION_UNSUPPORTED"; case -9: return "XR_ERROR_EXTENSION_NOT_PRESENT"; case -34: return "XR_ERROR_FORM_FACTOR_UNAVAILABLE";
+        case -35: return "XR_ERROR_FORM_FACTOR_UNSUPPORTED"; case -50: return "XR_ERROR_GRAPHICS_DEVICE_INVALID"; case -3: return "XR_ERROR_OUT_OF_MEMORY";
+        case 0: return "no OpenXR error code (see the log)"; default: return "OpenXR error";
+    }
+}
 
 static std::mutex g_viewsMx;
 static Views g_views;

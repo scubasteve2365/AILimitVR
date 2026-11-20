@@ -32,6 +32,7 @@ static void Build() {
             {"Upscaler", Value, nullptr},
             {"Decoupled pitch", Value, "On: the world stays level. Tilting the camera up or down with the stick (or lock-on) no longer tilts your view; look up and down with your head. Off: the view tilts with the game's camera, as in the flat game. Applies at once."},
             {"Resolution", Value, nullptr},
+            {"Picture", Value, nullptr},
             {"Close menu", Button, "Closes the mod menu. Insert or both sticks held also close it."}}},
         {"HUD", {
             {"HUD mode", Value, nullptr},
@@ -43,7 +44,11 @@ static void Build() {
         {"MOD MENU", {
             {"Menu size", Value, "Size of this menu. It has its own place, separate from the HUD."},
             {"Menu height", Value, "Moves this menu up or down from eye height, in metres."},
-            {"Menu distance", Value, "How far this menu stands in front of you, in metres."}}},
+            {"Menu distance", Value, "How far this menu stands in front of you, in metres."},
+            {"Menu sounds", Value, "Soft clicks when you move, change, switch tabs, open or close this menu. Off, Low, Medium or High."}}},
+        {"GAME", {
+            {"Load VR baseline settings", Button, nullptr},
+            {"Load best VR performance", Button, nullptr}}},
     };
 }
 
@@ -65,12 +70,21 @@ static void ValueText(const char* label, char* out, size_t n) {
     else if (l == "Menu size") sprintf_s(out, n, "%d%%", (int)lroundf(g_set.menuSize * 100));
     else if (l == "Menu height") sprintf_s(out, n, "%+.2f m", g_set.menuHeight);
     else if (l == "Menu distance") sprintf_s(out, n, "%.2f m", g_set.menuDistance);
+    else if (l == "Picture") { int li = aixr::LayerInUse(); sprintf_s(out, n, "%s%s", g_set.picture == 1 ? "Steady" : g_set.picture == 2 ? "Panel" : "Auto", g_set.picture == 0 ? (li == 1 ? " (Steady)" : li == 0 ? " (Panel)" : "") : ""); }
+    else if (l == "Menu sounds") { static const char* v[] = {"Off", "Low", "Medium", "High"}; sprintf_s(out, n, "%s", v[g_set.menuSound & 3]); }
     else out[0] = 0;
 }
 
 static float Clamp(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static void PushHud() { aixr::Panel p; p.mode = g_set.hudMode; p.width = g_set.hudWidth; p.x = g_set.hudX; p.y = g_set.hudY; p.distance = g_set.hudDistance; aixr::SetHud(p); }
+static void ChangeValue(const char* label, int dir);
 static void Change(const char* label, int dir) {
+    char before[48], after[48]; ValueText(label, before, sizeof before);
+    ChangeValue(label, dir);
+    ValueText(label, after, sizeof after);
+    PlayNav(strcmp(before, after) ? SndChange : SndRefused);
+}
+static void ChangeValue(const char* label, int dir) {
     std::string l = label;
     if (l == "Resolution") g_set.resolution = Clamp(roundf((g_set.resolution + dir * 0.05f) * 20) / 20, 0.5f, 2.0f);
     else if (l == "HUD mode") g_set.hudMode = (g_set.hudMode + 3 + dir) % 3;
@@ -85,6 +99,8 @@ static void Change(const char* label, int dir) {
     else if (l == "Menu size") g_set.menuSize = Clamp(roundf((g_set.menuSize + dir * 0.05f) * 20) / 20, 0.5f, 2.0f);
     else if (l == "Menu height") g_set.menuHeight = Clamp(g_set.menuHeight + dir * 0.02f, -0.6f, 0.6f);
     else if (l == "Menu distance") g_set.menuDistance = Clamp(g_set.menuDistance + dir * 0.05f, 0.3f, 2.0f);
+    else if (l == "Picture") { g_set.picture = (g_set.picture + 3 + dir) % 3; aixr::SetPicture(g_set.picture); }
+    else if (l == "Menu sounds") g_set.menuSound = (int)Clamp((float)(g_set.menuSound + dir), 0, 3);
     else return;
     if (l.rfind("HUD", 0) == 0) PushHud();
     SaveSettings();
@@ -92,11 +108,19 @@ static void Change(const char* label, int dir) {
     Log("MENU %s -> %s (saved)", label, v);
 }
 
+// The two settings buttons change many game settings: the first press arms, a second press within 5 s confirms.
+static std::string g_armed; static double g_armedAt = 0;
 static void Press(const char* label) {
     std::string l = label;
     Log("MENU pressed %s", label);
+    PlayNav(SndChange);
     if (l == "Recenter") aixr::Recenter();
     else if (l == "Close menu") { g_open = false; Log("MENU closed"); }
+    else if (l == "Load VR baseline settings" || l == "Load best VR performance") {
+        if (g_armed != l || Now() - g_armedAt > 5) { g_armed = l; g_armedAt = Now(); Log("MENU %s armed: press again to confirm", label); return; }
+        g_armed.clear();
+        if (l == "Load VR baseline settings") LoadVrBaseline(); else LoadBestPerformance();
+    }
 }
 
 static void Snapshot() {
@@ -119,6 +143,12 @@ static void Snapshot() {
                   g_eyeW, g_eyeH, NextW(), NextH());
     else if (l == "Upscaler")
         sprintf_s(s.explain, "How each eye is drawn. TAA: the game's own smoothing at full size. DLAA: NVIDIA's at full size, sharper. DLSS Quality to Ultra Performance: each eye drawn smaller and rebuilt by NVIDIA DLSS for more frame rate (RTX cards). Applies at once. Now: %s.", DlssStatus());
+    else if (l == "Picture")
+        strcpy_s(s.explain, "How the HUD and this menu are shown. Auto picks for your VR software: drawn into the 3D picture on Virtual Desktop (steadier there), separate sharp panels on SteamVR. Steady and Panel force one. Applies at once.");
+    else if (l == "Load VR baseline settings")
+        strcpy_s(s.explain, (g_armed == l && Now() - g_armedAt < 5) ? "Press A again to confirm. Sets the game's graphics back to its own defaults with VSync, LOCK FPS, motion blur and ambient occlusion off." : "Sets the game's own graphics settings back to what VR needs: its default quality, with VSync, LOCK FPS, motion blur and ambient occlusion off. Your mod settings are not touched. Press twice to confirm.");
+    else if (l == "Load best VR performance")
+        strcpy_s(s.explain, (g_armed == l && Now() - g_armedAt < 5) ? "Press A again to confirm. Lowest shadows and fog, ambient occlusion and motion blur off, DLSS on." : "Sets the game for the highest VR frame rate: lowest shadows and fog, ambient occlusion and motion blur off, VSync and LOCK FPS off, and DLSS on in both eyes if it was off. Textures are kept. Press twice to confirm.");
     else if (l == "HUD mode")
         strcpy_s(s.explain, g_set.hudMode == 0 ? "Fixed: the HUD stays in place in the room, in front of where you recentered. Look at it when you need it."
                           : g_set.hudMode == 1 ? "Follows head: the HUD stays in front of your eyes wherever you look."
@@ -182,6 +212,7 @@ static void Update(double now) {
     g_prevIns = ins;
     bool anyHeld = b != 0 || abs(ly) > 8000 || abs(lx) > 8000 || (pad && (st.lt > 30 || st.rt > 30)) ||
                    (kb && (Key(VK_UP) || Key(VK_DOWN) || Key(VK_LEFT) || Key(VK_RIGHT) || Key(VK_RETURN) || Key(VK_ESCAPE) || Key(VK_BACK) || Key(VK_PRIOR) || Key(VK_NEXT) || ins));
+    if (g_open != was) PlayNav(g_open ? SndOpen : SndClose);
     if (g_open && !g_block) { g_block = true; BlockGameInput(true); }
     else if (!g_open && g_block && !anyHeld) { g_block = false; BlockGameInput(false); Log("MENU input back to the game"); }
     if (g_open) {
@@ -194,15 +225,15 @@ static void Update(double now) {
         bool back = (b & PadB) || (kb && (Key(VK_ESCAPE) || Key(VK_BACK)));
         bool lb = (b & PadLB) || (pad && st.lt > 100) || (kb && Key(VK_PRIOR)), rb = (b & PadRB) || (pad && st.rt > 100) || (kb && Key(VK_NEXT));
         if (!was) { g_prevA = a; g_prevB = back; g_prevLB = lb; g_prevRB = rb; }  // the opening press does nothing in the menu
-        if (g_rUp.Step(up, now)) g_row = (g_row + (int)t.rows.size() - 1) % (int)t.rows.size();
-        if (g_rDown.Step(down, now)) g_row = (g_row + 1) % (int)t.rows.size();
+        if (g_rUp.Step(up, now)) { g_row = (g_row + (int)t.rows.size() - 1) % (int)t.rows.size(); PlayNav(SndMove); }
+        if (g_rDown.Step(down, now)) { g_row = (g_row + 1) % (int)t.rows.size(); PlayNav(SndMove); }
         const Row& r = t.rows[g_row];
         if (r.kind == Value) { if (g_rLeft.Step(left, now)) Change(r.label, -1); if (g_rRight.Step(right, now)) Change(r.label, +1); }
         else { g_rLeft.Step(false, now); g_rRight.Step(false, now); }
         if (a && !g_prevA && r.kind == Button) Press(r.label);
         if (back && !g_prevB) { g_open = false; Log("MENU closed (back)"); }
-        if (lb && !g_prevLB) { g_tab = (g_tab + (int)g_tabs.size() - 1) % (int)g_tabs.size(); g_row = 0; }
-        if (rb && !g_prevRB) { g_tab = (g_tab + 1) % (int)g_tabs.size(); g_row = 0; }
+        if (lb && !g_prevLB) { g_tab = (g_tab + (int)g_tabs.size() - 1) % (int)g_tabs.size(); g_row = 0; PlayNav(SndTab); }
+        if (rb && !g_prevRB) { g_tab = (g_tab + 1) % (int)g_tabs.size(); g_row = 0; PlayNav(SndTab); }
         g_prevA = a; g_prevB = back; g_prevLB = lb; g_prevRB = rb;
     }
     Snapshot();

@@ -10,6 +10,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <timeapi.h>
+#include <mmsystem.h>
 #include <d3d11.h>
 #include <cstdio>
 #include <cstdint>
@@ -24,8 +25,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.4.6"
-#define MOD_BUILD 46
+#define MOD_VERSION "0.5.0"
+#define MOD_BUILD 5
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -53,6 +54,7 @@ struct Settings {
     float worldScale = 1.0f;    // game metres per real metre of head movement and eye gap (1 life size, higher: smaller world, more depth)
     int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
     float lockOnLift = 150;     // lock-on marker raised by this many screen pixels (Steve's value, 2026-11-20)
+    int menuSound = 1;          // 0 Off, 1 Low, 2 Medium, 3 High
     int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down (Steve, 2026-11-20)
 };
 static Settings g_set;
@@ -66,7 +68,7 @@ static void IniW(const wchar_t* sec, const wchar_t* key, float v) {
 }
 static void LoadSettings() {
     g_set.resolution = IniF(L"VR", L"Resolution", 0.95f);
-    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1);
+    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1); g_set.menuSound = (int)IniF(L"Menu", L"Sounds", 1);
     g_set.picture = (int)IniF(L"VR", L"Picture", 0);
     g_set.hudMode = (int)IniF(L"HUD", L"Mode", 0);
     g_set.hudWidth = IniF(L"HUD", L"Size", 1.85f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
@@ -76,7 +78,7 @@ static void LoadSettings() {
 }
 static void SaveSettings() {
     IniW(L"VR", L"Resolution", g_set.resolution); IniW(L"VR", L"Picture", (float)g_set.picture);
-    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift); IniW(L"VR", L"DecoupledPitch", (float)g_set.decoupledPitch);
+    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift); IniW(L"VR", L"DecoupledPitch", (float)g_set.decoupledPitch); IniW(L"Menu", L"Sounds", (float)g_set.menuSound);
     IniW(L"HUD", L"Mode", (float)g_set.hudMode); IniW(L"HUD", L"Size", g_set.hudWidth); IniW(L"HUD", L"X", g_set.hudX);
     IniW(L"HUD", L"Height", g_set.hudY); IniW(L"HUD", L"Distance", g_set.hudDistance);
     IniW(L"Menu", L"Size", g_set.menuSize); IniW(L"Menu", L"Height", g_set.menuHeight); IniW(L"Menu", L"Distance", g_set.menuDistance);
@@ -383,6 +385,109 @@ static void hkDeal(Il2CppObject* self, MethodInfo* m) {
         P<void (*)(Il2CppObject*, Vec3, MethodInfo*)>(mTrSetPos)(tp, tp1, mTrSetPos);
         g_markerWritten = TrPos(tp);
     } catch (...) {}
+}
+
+// ---------------------------------------------------------------- menu sounds (generated tones, Phase 2)
+// Short soft tones made here as WAV data (not the game's audio files), played with PlaySound: move, change, tab,
+// open, close, refused. Volume row Off, Low, Medium, High. Costs nothing when the menu is shut.
+enum Snd { SndMove, SndChange, SndTab, SndOpen, SndClose, SndRefused, SndCount };
+static std::vector<uint8_t> g_snd[SndCount];
+static int g_sndBuiltFor = -1;
+static void Tone(std::vector<int16_t>& pcm, float f0, float f1, float ms, float amp) {
+    const int rate = 44100; int n = (int)(rate * ms / 1000);
+    double ph = 0;
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / n, f = f0 + (f1 - f0) * t;
+        float env = (i < rate / 333 ? i / (rate / 333.0f) : 1.0f) * expf(-4.0f * t);
+        ph += 6.2831853 * f / rate;
+        float v = (float)(sin(ph) + 0.25 * sin(2 * ph)) * env * amp;
+        pcm.push_back((int16_t)(v * 32767));
+    }
+}
+static void BuildSounds(int vol) {
+    static const float amp[4] = {0, 0.07f, 0.14f, 0.25f};
+    float a = amp[vol < 0 ? 0 : vol > 3 ? 3 : vol];
+    for (int k = 0; k < SndCount; k++) {
+        std::vector<int16_t> pcm;
+        switch (k) {
+            case SndMove: Tone(pcm, 1700, 1650, 28, a); break;
+            case SndChange: Tone(pcm, 1300, 1450, 40, a); break;
+            case SndTab: Tone(pcm, 900, 950, 55, a); break;
+            case SndOpen: Tone(pcm, 700, 700, 50, a); Tone(pcm, 1050, 1050, 70, a); break;
+            case SndClose: Tone(pcm, 1050, 1050, 50, a); Tone(pcm, 700, 700, 70, a); break;
+            case SndRefused: Tone(pcm, 220, 200, 90, a * 1.2f); break;
+        }
+        uint32_t data = (uint32_t)pcm.size() * 2;
+        std::vector<uint8_t>& w = g_snd[k]; w.assign(44 + data, 0);
+        auto put32 = [&](int o, uint32_t v) { memcpy(&w[o], &v, 4); }; auto put16 = [&](int o, uint16_t v) { memcpy(&w[o], &v, 2); };
+        memcpy(&w[0], "RIFF", 4); put32(4, 36 + data); memcpy(&w[8], "WAVEfmt ", 8); put32(16, 16); put16(20, 1); put16(22, 1);
+        put32(24, 44100); put32(28, 88200); put16(32, 2); put16(34, 16); memcpy(&w[36], "data", 4); put32(40, data);
+        memcpy(&w[44], pcm.data(), data);
+    }
+    g_sndBuiltFor = vol;
+}
+static void PlayNav(Snd k) {
+    if (g_set.menuSound <= 0) return;
+    if (g_sndBuiltFor != g_set.menuSound) BuildSounds(g_set.menuSound);
+    PlaySoundA((LPCSTR)g_snd[k].data(), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+}
+
+// ---------------------------------------------------------------- the game's own graphics settings (two menu buttons)
+// Through the game's GraphicOption (the object its settings screen uses): ChangeGraphicValue(type, value) for each
+// setting, then ApplyGraphicValue(). Types (GraphicOption.GraphicType): 0 LOCK FPS, 1 VSync, 2 textures,
+// 3 anti-aliasing, 4 fog, 5 ambient occlusion, 6 shadows, 8 motion blur. Every value written is logged.
+static void KeepPacingOff(const char* when);
+static MethodInfo *mGoAll, *mGoChange, *mGoApplyVals, *mGoGet[9];
+static int oGoDefTex = -1, oGoDefShadow = -1, oGoDefFog = -1;
+static Il2CppObject* GraphicOptionObj() {
+    if (!mGoAll) return nullptr;
+    Il2CppObject* list = P<Il2CppObject* (*)(MethodInfo*)>(mGoAll)(mGoAll);
+    if (!list) return nullptr;
+    Il2CppArray* it = Fld<Il2CppArray*>(list, oListItems); int n = Fld<int>(list, oListSize);
+    for (int i = 0; i < n; i++) { Il2CppObject* o = (Il2CppObject*)it->data[i]; if (o && !strcmp(ClassName(o), "GraphicOption")) return o; }
+    return nullptr;
+}
+static void LogGraphic(const char* when, Il2CppObject* g) {
+    static const char* nm[9] = {"LOCK FPS", "VSync", "textures", "anti-aliasing", "fog", "AO", "shadows", "", "motion blur"};
+    std::string line;
+    for (int t = 0; t < 9; t++) if (mGoGet[t]) { char b[48]; sprintf_s(b, "%s %d, ", nm[t], II(mGoGet[t], g)); line += b; }
+    Log("GAMESET %s: %s", when, line.c_str());
+}
+static bool SetGame(const char* why, const std::vector<std::pair<int, int>>& vals) {
+    Il2CppObject* g = GraphicOptionObj();
+    if (!g || !mGoChange || !mGoApplyVals) { Log("GAMESET %s: the game's GraphicOption was not found, nothing changed", why); return false; }
+    try {
+        LogGraphic((std::string(why) + " (before)").c_str(), g);
+        for (auto& v : vals) P<void (*)(Il2CppObject*, int, int, MethodInfo*)>(mGoChange)(g, v.first, v.second, mGoChange);
+        P<void (*)(Il2CppObject*, MethodInfo*)>(mGoApplyVals)(g, mGoApplyVals);
+        LogGraphic((std::string(why) + " (after)").c_str(), g);
+    } catch (...) { Log("GAMESET %s: the game refused a value (exception)", why); return false; }
+    KeepPacingOff("after the settings button");
+    return true;
+}
+static void LoadVrBaseline() {
+    Il2CppObject* g = GraphicOptionObj();
+    int tex = g && oGoDefTex >= 0 ? Fld<int>(g, oGoDefTex) : 1, sh = g && oGoDefShadow >= 0 ? Fld<int>(g, oGoDefShadow) : 0, fog = g && oGoDefFog >= 0 ? Fld<int>(g, oGoDefFog) : 0;
+    // The game's own defaults for quality, with the VR-unfriendly parts off and the mod pacing the frames.
+    SetGame("Load VR baseline settings", {{1, 0}, {0, -1}, {8, 0}, {5, 0}, {2, tex}, {6, sh}, {4, fog}});
+}
+static void LoadBestPerformance() {
+    // Lowest shadows and fog, no AO or motion blur; textures kept (memory, not speed). DLSS on per eye (Balanced, the tested default).
+    if (SetGame("Load best VR performance", {{1, 0}, {0, -1}, {8, 0}, {5, 0}, {6, 0}, {4, 0}}) && g_set.upscaler < 2) { g_set.upscaler = 3; ApplyUpscaler("best VR performance"); SaveSettings(); }
+}
+
+// ---------------------------------------------------------------- VR did not start: say so on the monitor
+static void ShowStartFailure() {
+    static bool shown = false;
+    if (shown) return; shown = true;
+    int err = aixr::LastError();
+    const char* step = err == -51 ? "Start SteamVR or Virtual Desktop first, with the headset connected, then start the game again."
+                     : err == -32 ? "An OpenXR add-on (API layer) would not load. Remove or update OpenXR add-ons such as OpenXR Toolkit or ReShade, then start the game again."
+                     : "Restart your VR software (SteamVR or Virtual Desktop) and start the game again.";
+    static char msg[700];
+    sprintf_s(msg, "VR DID NOT START\n\nOpenXR error %d (%s).\n\n%s\n\nThe game runs on the monitor for now. Details: AILimitVR.log in the game folder.", err, aixr::LastErrorName(), step);
+    Log("VR DID NOT START: OpenXR error %d (%s). Told the player: %s", err, aixr::LastErrorName(), step);
+    CloseHandle(CreateThread(nullptr, 0, [](void*) -> DWORD { MessageBoxA(nullptr, msg, "AI Limit VR", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND); return 0; }, nullptr, 0, nullptr));
 }
 
 #include "Menu.inc"
@@ -762,6 +867,7 @@ static void FrameStart(int frame) {
     bool running = g_vrOn && aixr::GetState() == aixr::Running;
     if (running && (g_framesSeen % 120) < 2 && g_framesSeen > 2) { try { Scan(g_framesSeen % 120); } catch (...) { Log("SCAN failed (game exception)"); } }
     if (running) Cap(v.periodSec);
+    if (g_vrStarted && aixr::GetState() == aixr::Failed) ShowStartFailure();
     if (running) g_issue(aixr::RenderEventFunc(), 3);  // GPU timestamp: start of this frame's rendering
     if (g_wantDumpUi) { g_wantDumpUi = false; try { DumpUi(); } catch (...) { Log("UIDUMP failed (game exception)"); } }
     if (g_wantInfo) { g_wantInfo = false; LogGameSet("asked"); Log("INFO frame %d, eyes %dx%d, game camera %p, recenters %u", frame, g_eyeW, g_eyeH, g_gameCam, v.recenters); }
@@ -887,6 +993,12 @@ static void Setup() {
     oGlTargetRoot = NeedField(kGlobal, "Global", "TargetPointUIRoot"); oGlTargetPoint = NeedField(kGlobal, "Global", "_TargetPoint");
     oHideRoot = NeedField(FindClass("", "HideUIElement"), "HideUIElement", "Root");
     mGoTransform = Need(kGameObject, "GameObject", "get_transform", 0);
+    void* kGOpt = FindClass("SenseGame.GameOptions", "GameOption"); void* kGraph = FindClass("SenseGame.GameOptions", "GraphicOption");
+    mGoAll = Need(kGOpt, "GameOption", "get_All", 0);
+    mGoChange = Need(kGraph, "GraphicOption", "ChangeGraphicValue", 2); mGoApplyVals = Need(kGraph, "GraphicOption", "ApplyGraphicValue", 0);
+    static const char* getters[9] = {"get_targetFrameRate", "get_vSyncCount", "get_textureQuality", "get_antialiasingMode", "get_fogQuality", "get_hbaoQuality", "get_shadowsQuality", nullptr, "get_motionBlur"};
+    for (int t = 0; t < 9; t++) mGoGet[t] = getters[t] && kGraph ? FindMethod(kGraph, getters[t], 0) : nullptr;
+    oGoDefTex = NeedField(kGraph, "GraphicOption", "_DefaultTextureQuality"); oGoDefShadow = NeedField(kGraph, "GraphicOption", "_DefaultShadowsQuality"); oGoDefFog = NeedField(kGraph, "GraphicOption", "_DefaultFogQuality");
     oCpvGlobal = NeedField(kCPV, "CustomPassVolume", "m_IsGlobal"); oCpvPasses = NeedField(kCPV, "CustomPassVolume", "customPasses");
     oCpvInject = NeedField(kCPV, "CustomPassVolume", "injectionPoint"); oCpvCam = NeedField(kCPV, "CustomPassVolume", "m_TargetCamera");
     oCpvUseCam = NeedField(kCPV, "CustomPassVolume", "useTargetCamera");
