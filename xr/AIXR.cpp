@@ -140,9 +140,10 @@ static bool CreateDeviceForRuntime(const LUID& want) {
 static const char* kRectShader = R"(
 Texture2D src : register(t0);
 SamplerState linearClamp : register(s0);
-cbuffer Rect : register(b0) { float4 corner[4]; };
+cbuffer Rect : register(b0) { float4 corner[4]; float4 opt; };
 void vs(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {
     uv = float2(id & 1, id >> 1);
+    if (opt.x > 0.5) uv.y = 1 - uv.y;   // Unity's render textures are stored bottom row first
     pos = corner[id];
 }
 float4 ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
@@ -163,7 +164,7 @@ static bool CreateRectPass() {
     g_dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_vs);
     g_dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_ps);
     vsb->Release(); psb->Release();
-    D3D11_BUFFER_DESC cb{}; cb.ByteWidth = 64; cb.Usage = D3D11_USAGE_DEFAULT; cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_BUFFER_DESC cb{}; cb.ByteWidth = 80; cb.Usage = D3D11_USAGE_DEFAULT; cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     g_dev->CreateBuffer(&cb, nullptr, &g_cb);
     D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
@@ -490,8 +491,9 @@ static Slot* TakeNewest() {
 }
 
 static ID3D11ShaderResourceView* g_menuSrv;  // this frame's menu, null when hidden
-static void DrawRect(ID3D11ShaderResourceView* srv, const float* corners) {
-    g_ctx->UpdateSubresource(g_cb, 0, nullptr, corners, 0, 0);
+static void DrawRect(ID3D11ShaderResourceView* srv, const float* corners, bool flip = false) {
+    float cb[20]; memcpy(cb, corners, 16 * sizeof(float)); cb[16] = flip ? 1.f : 0.f; cb[17] = cb[18] = cb[19] = 0;
+    g_ctx->UpdateSubresource(g_cb, 0, nullptr, cb, 0, 0);
     g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     g_ctx->VSSetShader(g_vs, nullptr, 0); g_ctx->VSSetConstantBuffers(0, 1, &g_cb);
     g_ctx->PSSetShader(g_ps, nullptr, 0); g_ctx->PSSetSamplers(0, 1, &g_linear); g_ctx->PSSetShaderResources(0, 1, &srv);
@@ -508,6 +510,27 @@ static void PlaceAt(float out[7], const float base[3], const float turn[4], floa
     V3 at = Rotate(turn, {x, y, -dist});
     out[0] = base[0] + at.x; out[1] = base[1] + at.y; out[2] = base[2] + at.z;
     memcpy(out + 3, turn, 4 * sizeof(float));
+}
+
+// Lab: the next composed left-eye projection image (game picture plus panels when drawn inside) to a raw file.
+static std::atomic<bool> g_wantXrSnap{false};
+static std::string g_xrSnapPath;
+void SnapComposed(const char* path) { g_xrSnapPath = path; g_wantXrSnap = true; }
+static void WriteComposed(ID3D11Texture2D* src) {
+    D3D11_TEXTURE2D_DESC d; src->GetDesc(&d);
+    D3D11_TEXTURE2D_DESC sd = d; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+    ID3D11Texture2D* st = nullptr;
+    if (FAILED(g_dev->CreateTexture2D(&sd, nullptr, &st))) { Log("XRSNAP staging failed"); return; }
+    g_ctx->CopyResource(st, src);
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (SUCCEEDED(g_ctx->Map(st, 0, D3D11_MAP_READ, 0, &map))) {
+        FILE* f = nullptr; fopen_s(&f, g_xrSnapPath.c_str(), "wb");
+        if (f) { uint32_t hdr[4] = {d.Width, d.Height, (uint32_t)d.Format, 4}; fwrite(hdr, 4, 4, f);
+            for (UINT y = 0; y < d.Height; y++) fwrite((uint8_t*)map.pData + y * map.RowPitch, 1, d.Width * 4, f); fclose(f); }
+        g_ctx->Unmap(st, 0);
+        Log("XRSNAP composed left eye %ux%u format %d written to %s (top row first)", d.Width, d.Height, (int)d.Format, g_xrSnapPath.c_str());
+    }
+    st->Release();
 }
 
 // Projection image for one eye: the game's eye picture full frame, plus the panels on top when they go into the eyes.
@@ -527,18 +550,19 @@ static bool DrawEye(int e, XrCompositionLayerProjectionView& out, bool panelsIns
     g_ctx->OMSetDepthStencilState(nullptr, 0);
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     static const float full[16] = {-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, 1, -1, 0, 1};
-    DrawRect(g_shown->srv[e], full);
+    DrawRect(g_shown->srv[e], full, true);
     const Views& v = g_shown->views;
     XrPosef pose; pose.position = {v.pose[e][0], v.pose[e][1], v.pose[e][2]}; pose.orientation = {v.pose[e][3], v.pose[e][4], v.pose[e][5], v.pose[e][6]};
     XrFovf fov{v.fov[e][0], v.fov[e][1], v.fov[e][2], v.fov[e][3]};
     if (panelsInside) {
         float corners[16];
         g_ctx->OMSetBlendState(g_alphaBlend, nullptr, 0xffffffff);
-        if (g_hudShow && g_shown->hasHud) { Corners(g_hudPose, g_hudSize, pose, fov, corners); DrawRect(g_shown->srv[2], corners); }
+        if (g_hudShow && g_shown->hasHud) { Corners(g_hudPose, g_hudSize, pose, fov, corners); DrawRect(g_shown->srv[2], corners, true); }
         if (g_menuSrv) { Corners(g_menuPose, g_menuSize, pose, fov, corners); DrawRect(g_menuSrv, corners); }
         g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     }
     { ID3D11RenderTargetView* none = nullptr; g_ctx->OMSetRenderTargets(1, &none, nullptr); }
+    if (e == 0 && g_wantXrSnap) { g_wantXrSnap = false; WriteComposed(s.images[idx].texture); }
     p_release(s.handle, nullptr);
     out = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
     out.pose = pose; out.fov = fov;
@@ -557,6 +581,35 @@ static bool CopyQuad(Swap& s, ID3D11Texture2D* src, int w, int h, const float po
     q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
     q.space = g_space; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
     q.subImage.swapchain = s.handle; q.subImage.imageRect.extent = {w, h};
+    q.pose.position = {pose[0], pose[1], pose[2]};
+    q.pose.orientation = {pose[3], pose[4], pose[5], pose[6]};
+    q.size = {size[0], size[1]};
+    return true;
+}
+
+// The HUD quad: drawn upright into its swapchain (the game's texture is stored bottom row first).
+static bool DrawQuad(Swap& s, ID3D11ShaderResourceView* srv, const float pose[7], const float size[2], XrCompositionLayerQuad& q) {
+    uint32_t idx = 0;
+    if (XR_FAILED(p_acquire(s.handle, nullptr, &idx))) return false;
+    XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; wi.timeout = 100000000;
+    if (XR_FAILED(p_waitImage(s.handle, &wi))) { p_release(s.handle, nullptr); return false; }
+    if (!s.rtv[idx]) {
+        D3D11_RENDER_TARGET_VIEW_DESC rv{}; rv.Format = (DXGI_FORMAT)g_format; rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        g_dev->CreateRenderTargetView(s.images[idx].texture, &rv, &s.rtv[idx]);
+    }
+    float clear[4] = {0, 0, 0, 0};
+    g_ctx->ClearRenderTargetView(s.rtv[idx], clear);
+    D3D11_VIEWPORT vp{0, 0, (float)s.w, (float)s.h, 0, 1};
+    g_ctx->RSSetViewports(1, &vp); g_ctx->RSSetState(g_noCull); g_ctx->IASetInputLayout(nullptr);
+    g_ctx->OMSetRenderTargets(1, &s.rtv[idx], nullptr); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    static const float full[16] = {-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, 1, -1, 0, 1};
+    DrawRect(srv, full, true);
+    { ID3D11RenderTargetView* none = nullptr; g_ctx->OMSetRenderTargets(1, &none, nullptr); }
+    p_release(s.handle, nullptr);
+    q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+    q.space = g_space; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    q.subImage.swapchain = s.handle; q.subImage.imageRect.extent = {s.w, s.h};
     q.pose.position = {pose[0], pose[1], pose[2]};
     q.pose.orientation = {pose[3], pose[4], pose[5], pose[6]};
     q.size = {size[0], size[1]};
@@ -647,7 +700,7 @@ static void XrThread() {
             if (DrawEye(0, pv[0], inside) && DrawEye(1, pv[1], inside)) {
                 proj.space = g_space; proj.viewCount = 2; proj.views = pv; layers[nl++] = (XrCompositionLayerBaseHeader*)&proj;
                 if (!inside) {
-                    if (g_hudShow && g_shown->hasHud && CopyQuad(g_hudSwap, g_shown->xrTex[2], g_hudW, g_hudH, g_hudPose, g_hudSize, quads[0])) layers[nl++] = (XrCompositionLayerBaseHeader*)&quads[0];
+                    if (g_hudShow && g_shown->hasHud && DrawQuad(g_hudSwap, g_shown->srv[2], g_hudPose, g_hudSize, quads[0])) layers[nl++] = (XrCompositionLayerBaseHeader*)&quads[0];
                     if (g_menuSrv) {
                         if (!g_menuSwap.handle) MakeSwap(g_menuSwap, 1280, 800, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT);
                         if (g_menuSwap.handle && CopyQuad(g_menuSwap, MenuTexture(), 1280, 800, g_menuPose, g_menuSize, quads[1])) layers[nl++] = (XrCompositionLayerBaseHeader*)&quads[1];

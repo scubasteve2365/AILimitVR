@@ -22,3 +22,6 @@ target_link_libraries(AILimitVRNative PRIVATE minhook d3d11 dxgi winmm ws2_32)
 add_custom_command(TARGET AILimitVRNative POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${OPENXR_DIR}/x64/bin/openxr_loader.dll" "${OUT}/openxr_loader.dll")
 set_target_properties(AILimitVRNative PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OUT}")
+# Symbols for crash reports (the shipped DLL is the same code; the .pdb and .map stay in the build folder)
+target_compile_options(AILimitVRNative PRIVATE /Zi)
+target_link_options(AILimitVRNative PRIVATE /DEBUG /OPT:REF /OPT:ICF /MAP)

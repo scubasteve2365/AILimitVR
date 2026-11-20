@@ -173,6 +173,7 @@ static MethodInfo *mCamGetTarget, *mCamSetTarget, *mCamCopyFrom, *mCamSetProj, *
     *mCanvasMode, *mCanvasSetMode, *mCanvasSetCam, *mCanvasSetPlane, *mCanvasRoot, *mTimeTime, *mTimeScale, *mTimeFixedDelta,
     *mTimeMaxDelta, *mTimeFrame, *mVSync, *mSetVSync, *mTargetFps, *mSetTargetFps, *mScreenW, *mScreenH, *mPrefsGetInt,
     *mListEnabledActions, *mActionEnable, *mActionDisable, *mRender;
+static MethodInfo* mVolMgrInstance; static int oVolMgrVolumes = -1;
 static int oHdClearMode, oHdBg, oHdVolMask, oHdAA, oVolProfile, oProfComps, oCompActive, oListItems = 0x10, oListSize = 0x18;
 typedef void (*IssuePluginEvent_t)(void* cb, int id);
 static IssuePluginEvent_t g_issue;
@@ -188,7 +189,9 @@ static void SetIB(MethodInfo* m, Il2CppObject* o, bool v) { P<void (*)(Il2CppObj
 static void SetII(MethodInfo* m, Il2CppObject* o, int v) { P<void (*)(Il2CppObject*, int, MethodInfo*)>(m)(o, v, m); }
 static void SetIF(MethodInfo* m, Il2CppObject* o, float v) { P<void (*)(Il2CppObject*, float, MethodInfo*)>(m)(o, v, m); }
 static void SetIO(MethodInfo* m, Il2CppObject* o, Il2CppObject* v) { P<void (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(m)(o, v, m); }
-static void* TexPtr(Il2CppObject* t) { return P<void* (*)(Il2CppObject*, MethodInfo*)>(mTexNative)(t, mTexNative); }
+typedef void* (*TexNativeIcall_t)(Il2CppObject*);
+static TexNativeIcall_t g_texNativeIcall;  // the method is stripped in this game; the engine's internal call is used instead
+static void* TexPtr(Il2CppObject* t) { return mTexNative ? P<void* (*)(Il2CppObject*, MethodInfo*)>(mTexNative)(t, mTexNative) : g_texNativeIcall(t); }
 static Il2CppObject* Transform(Il2CppObject* c) { return GetObj(mCompTransform, c); }
 static Il2CppObject* GetComp(Il2CppObject* c, void* klass) { return P<Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(mCompGet)(c, TypeOf(klass), mCompGet); }
 
@@ -325,10 +328,17 @@ static void Cap(double periodSec) {
 // Every 2 s while VR runs (scenes load new volumes and canvases). Its cost is logged (SCAN max ms).
 static std::set<Il2CppObject*> g_offComps;
 static const char* kOff[] = {"FilmGrain", "Bloom", "MotionBlur", "RadialBlur", "HBAO", "ScreenSpaceAmbientOcclusion", "ScreenSpaceReflection", "ChromaticAberration"};
-static void Scan() {
+static double g_scanVolMax = 0, g_scanCanvasMax = 0;
+static void Scan(int part) {
     double t0 = Now();
-    Il2CppArray* vols = FindAll(kVolume);
-    for (uintptr_t i = 0; vols && i < vols->max_length; i++) {
+    // The volumes HDRP knows about, from VolumeManager.instance.m_Volumes (FindObjectsOfType cost about 6 ms).
+    Il2CppArray* vols = nullptr; int nv = 0;
+    if (part == 0) {
+        Il2CppObject* vm = P<Il2CppObject* (*)(MethodInfo*)>(mVolMgrInstance)(mVolMgrInstance);
+        Il2CppObject* vl = vm ? Fld<Il2CppObject*>(vm, oVolMgrVolumes) : nullptr;
+        if (vl) { vols = Fld<Il2CppArray*>(vl, oListItems); nv = Fld<int>(vl, oListSize); }
+    }
+    for (int i = 0; vols && i < nv; i++) {
         Il2CppObject* v = (Il2CppObject*)vols->data[i]; if (!v) continue;
         Il2CppObject* prof = Fld<Il2CppObject*>(v, oVolProfile); if (!prof) continue;
         Il2CppObject* list = Fld<Il2CppObject*>(prof, oProfComps); if (!list) continue;
@@ -341,7 +351,8 @@ static void Scan() {
             }
         }
     }
-    if (g_hudCam) {
+    if (part == 0) { double ms = (Now() - t0) * 1000; if (ms > g_scanVolMax) g_scanVolMax = ms; }
+    if (part == 1 && g_hudCam) {
         Il2CppArray* cvs = FindAll(kCanvas);
         int moved = 0;
         for (uintptr_t i = 0; cvs && i < cvs->max_length; i++) {
@@ -349,7 +360,8 @@ static void Scan() {
             if (II(mCanvasMode, c) != 0) continue;  // 0 = Screen Space Overlay
             SetII(mCanvasSetMode, c, 1); SetIO(mCanvasSetCam, c, g_hudCam); SetIF(mCanvasSetPlane, c, 1.0f); moved++;
         }
-        if (moved) Log("HUD %d overlay canvas(es) moved to the HUD camera", moved);
+        if (moved) Log("HUD %d overlay canvas(es) moved to the HUD camera (of %d canvases)", moved, cvs ? (int)cvs->max_length : 0);
+        double ms = (Now() - t0) * 1000; if (ms > g_scanCanvasMax) g_scanCanvasMax = ms;
     }
     double ms = (Now() - t0) * 1000; if (ms > g_scanMsMax) g_scanMsMax = ms; g_scanCount++;
 }
@@ -371,9 +383,9 @@ static void Periodic() {
     if (g_vrStarted && fabs(speed - 1.0) > 0.05 && SF(mTimeScale) > 0.99) Log("SPEED WARNING: game time runs at %.2f of real time", speed);
     aixr::Stats s; aixr::TakeStats(&s);
     double cpu = g_frames ? (g_frameSum - g_capWaitSum) / g_frames : 0;
-    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms",
+    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f)",
         frames ? dt * 1000 / frames : 0, g_frameMax, cpu, s.gpuMsAvg, s.gpuMsMax, s.gpuSamples, g_capped ? g_capWaitSum / g_capped : 0, g_capWaitMax,
-        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax);
+        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax); g_scanVolMax = g_scanCanvasMax = 0;
     Log("XRSTAT state %d session %d focused %d, xr frames %u (no new image %u, layers sent %u), queued %u copied %u skipped busy %u no slot %u, copy max %.2f ms, xrWaitFrame avg %.2f max %.2f ms, xrEndFrame avg %.2f max %.2f ms, layer %d",
         aixr::GetState(), v.sessionState, v.focused, s.xrFrames, s.xrNoNewImage, s.layersSent, s.queued, s.copied, s.skippedBusy, s.skippedNoSlots, s.copyMsMax,
         s.waitMsAvg, s.waitMsMax, s.endMsAvg, s.endMsMax, aixr::LayerInUse());
@@ -398,6 +410,7 @@ static void PollCommands() {
         std::istringstream ls(line); std::string c; ls >> c;
         if (c == "info") g_wantInfo = true;
         else if (c == "snap") g_wantSnap = true;
+        else if (c == "xrsnap") { static int n = 0; char pth[MAX_PATH]; sprintf_s(pth, "%lsAILimitVR/snaps/xr%d.raw", g_gameDir.c_str(), ++n); aixr::SnapComposed(pth); }
         else if (c == "eyecheck") { int n; ls >> n; g_eyeCheck = n != 0; }
         else if (c == "vr") { int n; ls >> n; g_vrOn = n != 0; }
         else if (c == "flat") { int n; ls >> n; g_flatToo = n != 0; }
@@ -497,6 +510,16 @@ static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodIn
     int frame = SI(mTimeFrame);
     if (frame != g_lastFrame) { g_lastFrame = frame; FrameStart(frame); }
     bool vrRunning = g_vrOn && aixr::GetState() == aixr::Running && aixr::EyeWidth() > 0;
+    static bool listChecked = false;
+    if (!listChecked && cams) {
+        // List<Camera> field offsets from the real (closed) list class; the open generic List`1 reports 0.
+        listChecked = true;
+        void* k = il2cpp_object_get_class(cams);
+        void* fi = il2cpp_class_get_field_from_name(k, "_items"); void* fs = il2cpp_class_get_field_from_name(k, "_size");
+        int oi = fi ? (int)il2cpp_field_get_offset(fi) : 0, os = fs ? (int)il2cpp_field_get_offset(fs) : 0;
+        if (oi > 0) oListItems = oi; if (os > 0) oListSize = os;
+        Log("HOOKMAP %s _items 0x%X _size 0x%X (used 0x%X 0x%X), %d camera(s) in the first call", il2cpp_class_get_name(k), oi, os, oListItems, oListSize, Fld<int>(cams, oListSize));
+    }
     if (!vrRunning || !cams) { oRender(self, ctx, cams, m); return; }
     double t0 = Now();
     Il2CppArray* items = Fld<Il2CppArray*>(cams, oListItems); int n = Fld<int>(cams, oListSize);
@@ -565,7 +588,7 @@ static void FrameStart(int frame) {
     }
     aixr::Views v; aixr::GetViews(&v);
     bool running = g_vrOn && aixr::GetState() == aixr::Running;
-    if (running && (g_framesSeen % 120) == 0) { try { Scan(); } catch (...) { Log("SCAN failed (game exception)"); } }
+    if (running && (g_framesSeen % 120) < 2 && g_framesSeen > 2) { try { Scan(g_framesSeen % 120); } catch (...) { Log("SCAN failed (game exception)"); } }
     if (running) Cap(v.periodSec);
     if (running) g_issue(aixr::RenderEventFunc(), 3);  // GPU timestamp: start of this frame's rendering
     if (g_wantInfo) { g_wantInfo = false; LogGameSet("asked"); Log("INFO frame %d, eyes %dx%d, game camera %p, recenters %u", frame, g_eyeW, g_eyeH, g_gameCam, v.recenters); }
@@ -657,11 +680,16 @@ static void Setup() {
     void* kRT = FindClass("UnityEngine", "RenderTexture");
     mRTCtor = Need(kRT, "RenderTexture", ".ctor", 5, "System.Int32,System.Int32,System.Int32,UnityEngine.RenderTextureFormat,UnityEngine.RenderTextureReadWrite");
     mRTCreate = Need(kRT, "RenderTexture", "Create", 0);
-    mTexNative = Need(FindClass("UnityEngine", "Texture"), "Texture", "GetNativeTexturePtr", 0);
+    mTexNative = FindMethod(FindClass("UnityEngine", "Texture"), "GetNativeTexturePtr", 0);
+    g_texNativeIcall = (TexNativeIcall_t)il2cpp_resolve_icall("UnityEngine.Texture::GetNativeTexturePtr");
+    Log("HOOKMAP Texture.GetNativeTexturePtr method %s, icall %s", mTexNative ? "found" : "stripped", g_texNativeIcall ? "found" : "NOT FOUND");
+    if (!mTexNative && !g_texNativeIcall) g_missing++;
     mCanvasMode = Need(kCanvas, "Canvas", "get_renderMode", 0); mCanvasSetMode = Need(kCanvas, "Canvas", "set_renderMode", 1);
     mCanvasSetCam = Need(kCanvas, "Canvas", "set_worldCamera", 1); mCanvasSetPlane = Need(kCanvas, "Canvas", "set_planeDistance", 1);
     mCanvasRoot = Need(kCanvas, "Canvas", "get_isRootCanvas", 0);
     oVolProfile = NeedField(kVolume, "Volume", "sharedProfile");
+    void* kVM = FindClass("UnityEngine.Rendering", "VolumeManager");
+    mVolMgrInstance = Need(kVM, "VolumeManager", "get_instance", 0); oVolMgrVolumes = NeedField(kVM, "VolumeManager", "m_Volumes");
     void* kProf = FindClass("UnityEngine.Rendering", "VolumeProfile");
     oProfComps = NeedField(kProf, "VolumeProfile", "components");
     oCompActive = NeedField(FindClass("UnityEngine.Rendering", "VolumeComponent"), "VolumeComponent", "active");
@@ -680,10 +708,7 @@ static void Setup() {
     mListEnabledActions = Need(kIS, "InputSystem", "ListEnabledActions", 0);
     void* kAct = FindClass("UnityEngine.InputSystem", "InputAction");
     mActionEnable = Need(kAct, "InputAction", "Enable", 0); mActionDisable = Need(kAct, "InputAction", "Disable", 0);
-    void* kList = FindClass("System.Collections.Generic", "List`1");
-    if (kList) { void* fi = il2cpp_class_get_field_from_name(kList, "_items"); void* fs = il2cpp_class_get_field_from_name(kList, "_size");
-        if (fi) oListItems = (int)il2cpp_field_get_offset(fi); if (fs) oListSize = (int)il2cpp_field_get_offset(fs); }
-    Log("HOOKMAP List<T> _items 0x%X _size 0x%X", oListItems, oListSize);
+
     g_issue = (IssuePluginEvent_t)il2cpp_resolve_icall("UnityEngine.GL::GLIssuePluginEvent");
     Log("HOOKMAP icall GL::GLIssuePluginEvent %s", g_issue ? "found" : "NOT FOUND");
     void* kPipe = FindClass("UnityEngine.Rendering.HighDefinition", "HDRenderPipeline");

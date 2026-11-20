@@ -49,6 +49,7 @@ void QueueFrame(void* texL, void* texR, void* hud, const Views& used, uint32_t f
 // GL.IssuePluginEvent(RenderEventFunc(), 3) at the start of the frame's rendering: GPU timestamp for the GPU time line.
 void* RenderEventFunc();
 void Shutdown();
+void SnapComposed(const char* path);  // lab: next composed left-eye image to a raw file
 
 struct Stats {
     uint32_t queued, copied, skippedBusy, skippedNoSlots, xrFrames, xrNoNewImage, layersSent, gpuSamples;
