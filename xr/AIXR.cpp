@@ -41,6 +41,7 @@ static char g_runtime[XR_MAX_RUNTIME_NAME_SIZE] = "", g_headset[XR_MAX_SYSTEM_NA
 static std::atomic<int> g_recW{0}, g_recH{0};
 static std::thread g_thread;
 static std::atomic<bool> g_quit{false};
+std::atomic<bool> g_gpuTiming{true};
 static std::atomic<bool> g_wantRecenter{true};
 
 void Configure(int picture, float resolution, int hudW, int hudH) { g_picture = picture; g_resolution = resolution; g_hudW = hudW; g_hudH = hudH; }
@@ -341,6 +342,7 @@ static bool StartXr() {
     if (!MakeSwap(g_hudSwap, g_hudW, g_hudH, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT)) return false;
     bool vd = strstr(g_runtime, "VirtualDesktop") || strstr(g_runtime, "Virtual Desktop");
     bool steady = g_picture == 1 || (g_picture == 0 && vd);
+    if (vd) { g_gpuTiming = false; Log("XR GPU time is not measured on Virtual Desktop (its D3D11 hook crashed with the timing queries)"); }
     g_layerInUse = steady ? 1 : 0;
     Log("XR PICTURE setting %s, runtime \"%s\", headset \"%s\", flat panels %s, swapchain format %d, eye images %dx%d",
         g_picture == 1 ? "Steady" : g_picture == 2 ? "Panel" : "Auto", g_runtime, g_headset, steady ? "drawn into the eyes (Steady, projection)" : "quad layers (Panel)",
@@ -407,8 +409,11 @@ static ID3D11Device* g_gameDev; static ID3D11DeviceContext* g_gameCtx;
 // (event 1), read back a few frames later. Never waits on the GPU.
 struct GpuQ { ID3D11Query *dis = nullptr, *t0 = nullptr, *t1 = nullptr; bool open = false, ended = false; };
 static GpuQ g_gq[6]; static int g_gqi = 0;
+// Off on Virtual Desktop: it hooks the game's D3D11 work, and its hook crashed on Steve's Quest 3 (freed pointer on the
+// game's render thread). Ori WotW VR, the same design without these queries, runs fine there. RE_NOTES "Quest 3 crash".
+extern std::atomic<bool> g_gpuTiming;  // defined at the top
 static void GpuBegin() {
-    if (!g_gameDev) return;
+    if (!g_gameDev || !g_gpuTiming) return;
     GpuQ& q = g_gq[g_gqi % 6];
     if (!q.dis) {
         D3D11_QUERY_DESC d{D3D11_QUERY_TIMESTAMP_DISJOINT, 0}; g_gameDev->CreateQuery(&d, &q.dis);
@@ -418,7 +423,7 @@ static void GpuBegin() {
     g_gameCtx->Begin(q.dis); g_gameCtx->End(q.t0); q.open = true;
 }
 static void GpuEnd() {
-    if (!g_gameDev) return;
+    if (!g_gameDev || !g_gpuTiming) return;
     GpuQ& q = g_gq[g_gqi % 6];
     if (q.open) { g_gameCtx->End(q.t1); g_gameCtx->End(q.dis); q.open = false; q.ended = true; g_gqi++; }
     for (auto& r : g_gq) {
