@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.4.5"
-#define MOD_BUILD 45
+#define MOD_VERSION "0.4.6"
+#define MOD_BUILD 46
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -345,22 +345,44 @@ static float DrsScale() {
 }
 
 // ---------------------------------------------------------------- lock-on marker lift (Steve, build 2: a touch too low)
-static Il2CppObject* g_markerTr; static Vec3 g_markerWritten{1e9f, 0, 0};
+static Vec3 g_markerWritten{1e9f, 0, 0};
 static MethodInfo* mTrSetPos;
-static void LiftMarker() {
-    if (g_set.lockOnLift == 0 || !kGlobal) return;
+// The lift is applied right after the game positions the marker (Global.DealTargetPoint), before Unity rebuilds the
+// canvases for this frame. Build 3 applied it at render time, after the rebuild, so it never showed (Steve, 2026-11-20).
+static MethodInfo* mGoTransform;
+typedef void (*Deal_t)(Il2CppObject*, MethodInfo*);
+static Deal_t oDeal;
+static uint32_t g_dealCalls = 0, g_dealLogged = 0;
+static Il2CppObject* GoTransform(Il2CppObject* go) { return P<Il2CppObject* (*)(Il2CppObject*, MethodInfo*)>(mGoTransform)(go, mGoTransform); }
+static Vec3 TrPos(Il2CppObject* t) { return P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(t, mTrPos); }
+static bool Same(Vec3 a, Vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
+static void hkDeal(Il2CppObject* self, MethodInfo* m) {
+    Il2CppObject* tp = nullptr; Il2CppObject* root = nullptr; Vec3 tp0{}, root0{};
     try {
-        if (!g_markerTr) {
-            Il2CppArray* gl = FindAll(kGlobal);
-            if (gl && gl->max_length) { Il2CppObject* tp = Fld<Il2CppObject*>((Il2CppObject*)gl->data[0], oGlTargetPoint); if (tp) g_markerTr = Keep(tp); }
-            if (!g_markerTr) return;
+        tp = Fld<Il2CppObject*>(self, oGlTargetPoint);
+        Il2CppObject* hide = Fld<Il2CppObject*>(self, oGlTargetRoot);
+        Il2CppObject* rgo = hide ? Fld<Il2CppObject*>(hide, oHideRoot) : nullptr;
+        root = rgo ? GoTransform(rgo) : nullptr;
+        if (tp) tp0 = TrPos(tp);
+        if (root) root0 = TrPos(root);
+    } catch (...) { tp = root = nullptr; }
+    oDeal(self, m);
+    g_dealCalls++;
+    if (!tp) return;
+    try {
+        Vec3 tp1 = TrPos(tp), root1 = root ? TrPos(root) : Vec3{};
+        bool tpMoved = !Same(tp0, tp1), rootMoved = root && !Same(root0, root1);
+        if ((tpMoved || rootMoved) && g_dealLogged < 6) {
+            g_dealLogged++;
+            Log("MARKER DealTargetPoint moved TargetPoint %d (%.1f %.1f %.1f -> %.1f %.1f %.1f), Root %d (%.1f %.1f -> %.1f %.1f), lift %+.0f px",
+                tpMoved, tp0.x, tp0.y, tp0.z, tp1.x, tp1.y, tp1.z, rootMoved, root0.x, root0.y, root1.x, root1.y, g_set.lockOnLift);
         }
-        Vec3 p = P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(g_markerTr, mTrPos);
-        if (p.x == g_markerWritten.x && p.y == g_markerWritten.y && p.z == g_markerWritten.z) return;  // the game did not move it since our lift
-        p.y += g_set.lockOnLift;
-        P<void (*)(Il2CppObject*, Vec3, MethodInfo*)>(mTrSetPos)(g_markerTr, p, mTrSetPos);
-        g_markerWritten = P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(g_markerTr, mTrPos);
-    } catch (...) { g_markerTr = nullptr; }
+        if (g_set.lockOnLift == 0) return;
+        if (!tpMoved && Same(tp1, g_markerWritten)) return;  // still where our last lift put it: do not lift twice
+        tp1.y += g_set.lockOnLift;
+        P<void (*)(Il2CppObject*, Vec3, MethodInfo*)>(mTrSetPos)(tp, tp1, mTrSetPos);
+        g_markerWritten = TrPos(tp);
+    } catch (...) {}
 }
 
 #include "Menu.inc"
@@ -472,7 +494,7 @@ static void Periodic() {
     Log("XRSTAT state %d session %d focused %d, xr frames %u (no new image %u, layers sent %u), queued %u copied %u skipped busy %u no slot %u, copy max %.2f ms, xrWaitFrame avg %.2f max %.2f ms, xrEndFrame avg %.2f max %.2f ms, layer %d",
         aixr::GetState(), v.sessionState, v.focused, s.xrFrames, s.xrNoNewImage, s.layersSent, s.queued, s.copied, s.skippedBusy, s.skippedNoSlots, s.copyMsMax,
         s.waitMsAvg, s.waitMsMax, s.endMsAvg, s.endMsMax, aixr::LayerInUse());
-    Log("INPUT pad reads %u, menu open %d, blocking the game %d | NET blocked %u allowed (local) %u", menu::g_padReads, menu::g_open, menu::g_block, g_netBlocked, g_netAllowed);
+    Log("INPUT pad reads %u, menu open %d, blocking the game %d | NET blocked %u allowed (local) %u | marker updates %u", menu::g_padReads, menu::g_open, menu::g_block, g_netBlocked, g_netAllowed, g_dealCalls); g_dealCalls = 0;
     menu::g_padReads = 0;
     g_capWaitSum = g_capWaitMax = g_hookCpuSum = g_hookCpuMax = g_frameMax = g_frameSum = g_scanMsMax = 0; g_capped = g_eyeFrames = g_renderCalls = g_flatSkipped = g_late = g_frames = 0;
     g_statT0 = t; g_statGame0 = game; g_statFrames0 = frame;
@@ -636,7 +658,7 @@ static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodIn
         else if (game != g_gameCam) { CopyGameCamera(game); ApplyUpscaler("game camera changed"); }
         g_gameCam = game;
     }
-    if (g_gameCam && g_posedFrame != frame) { g_posedFrame = frame; LiftMarker(); PoseEyes(g_gameCam); }
+    if (g_gameCam && g_posedFrame != frame) { g_posedFrame = frame; PoseEyes(g_gameCam); }
     // Leave the game's own flat render out while VR runs.
     bool removed = false;
     if (gameIdx >= 0 && !g_flatToo) {
@@ -864,6 +886,7 @@ static void Setup() {
     kGlobal = FindClass("", "Global");
     oGlTargetRoot = NeedField(kGlobal, "Global", "TargetPointUIRoot"); oGlTargetPoint = NeedField(kGlobal, "Global", "_TargetPoint");
     oHideRoot = NeedField(FindClass("", "HideUIElement"), "HideUIElement", "Root");
+    mGoTransform = Need(kGameObject, "GameObject", "get_transform", 0);
     oCpvGlobal = NeedField(kCPV, "CustomPassVolume", "m_IsGlobal"); oCpvPasses = NeedField(kCPV, "CustomPassVolume", "customPasses");
     oCpvInject = NeedField(kCPV, "CustomPassVolume", "injectionPoint"); oCpvCam = NeedField(kCPV, "CustomPassVolume", "m_TargetCamera");
     oCpvUseCam = NeedField(kCPV, "CustomPassVolume", "useTargetCamera");
@@ -897,6 +920,7 @@ static void Setup() {
     if (g_missing) Log("HOOKMAP %d item(s) not found: VR stays off", g_missing);
     if (g_missing || !g_issue || !mRender) { g_vrOn = false; return; }
     Hook(mRender, (void*)&hkRender, (void**)&oRender, "HDRenderPipeline.Render(List<Camera>)");
+    Hook(Need(kGlobal, "Global", "DealTargetPoint", 0), (void*)&hkDeal, (void**)&oDeal, "Global.DealTargetPoint (lock-on marker height)");
 }
 
 static DWORD WINAPI InitThread(void*) {
