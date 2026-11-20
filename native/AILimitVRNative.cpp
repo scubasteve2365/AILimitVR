@@ -437,7 +437,7 @@ static void PlayNav(Snd k) {
 // setting, then ApplyGraphicValue(). Types (GraphicOption.GraphicType): 0 LOCK FPS, 1 VSync, 2 textures,
 // 3 anti-aliasing, 4 fog, 5 ambient occlusion, 6 shadows, 8 motion blur. Every value written is logged.
 static void KeepPacingOff(const char* when);
-static MethodInfo *mGoAll, *mGoChange, *mGoApplyVals, *mGoGet[9];
+static MethodInfo *mGoAll, *mGoChange, *mGoApplyVals, *mGoGet[9], *mGoSet[2];
 static int oGoDefTex = -1, oGoDefShadow = -1, oGoDefFog = -1;
 static Il2CppObject* GraphicOptionObj() {
     if (!mGoAll) return nullptr;
@@ -460,6 +460,8 @@ static bool SetGame(const char* why, const std::vector<std::pair<int, int>>& val
         LogGraphic((std::string(why) + " (before)").c_str(), g);
         for (auto& v : vals) P<void (*)(Il2CppObject*, int, int, MethodInfo*)>(mGoChange)(g, v.first, v.second, mGoChange);
         P<void (*)(Il2CppObject*, MethodInfo*)>(mGoApplyVals)(g, mGoApplyVals);
+        // VSync did not take through ChangeGraphicValue on RigB (stayed 1): also through the property setters.
+        for (auto& v : vals) if ((v.first == 0 || v.first == 1) && mGoSet[v.first]) P<void (*)(Il2CppObject*, int, MethodInfo*)>(mGoSet[v.first])(g, v.second, mGoSet[v.first]);
         LogGraphic((std::string(why) + " (after)").c_str(), g);
     } catch (...) { Log("GAMESET %s: the game refused a value (exception)", why); return false; }
     KeepPacingOff("after the settings button");
@@ -998,6 +1000,7 @@ static void Setup() {
     mGoChange = Need(kGraph, "GraphicOption", "ChangeGraphicValue", 2); mGoApplyVals = Need(kGraph, "GraphicOption", "ApplyGraphicValue", 0);
     static const char* getters[9] = {"get_targetFrameRate", "get_vSyncCount", "get_textureQuality", "get_antialiasingMode", "get_fogQuality", "get_hbaoQuality", "get_shadowsQuality", nullptr, "get_motionBlur"};
     for (int t = 0; t < 9; t++) mGoGet[t] = getters[t] && kGraph ? FindMethod(kGraph, getters[t], 0) : nullptr;
+    mGoSet[0] = Need(kGraph, "GraphicOption", "set_targetFrameRate", 1); mGoSet[1] = Need(kGraph, "GraphicOption", "set_vSyncCount", 1);
     oGoDefTex = NeedField(kGraph, "GraphicOption", "_DefaultTextureQuality"); oGoDefShadow = NeedField(kGraph, "GraphicOption", "_DefaultShadowsQuality"); oGoDefFog = NeedField(kGraph, "GraphicOption", "_DefaultFogQuality");
     oCpvGlobal = NeedField(kCPV, "CustomPassVolume", "m_IsGlobal"); oCpvPasses = NeedField(kCPV, "CustomPassVolume", "customPasses");
     oCpvInject = NeedField(kCPV, "CustomPassVolume", "injectionPoint"); oCpvCam = NeedField(kCPV, "CustomPassVolume", "m_TargetCamera");
