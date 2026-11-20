@@ -173,6 +173,10 @@ static MethodInfo *mCamGetTarget, *mCamSetTarget, *mCamCopyFrom, *mCamSetProj, *
     *mCanvasMode, *mCanvasSetMode, *mCanvasSetCam, *mCanvasSetPlane, *mCanvasRoot, *mTimeTime, *mTimeScale, *mTimeFixedDelta,
     *mTimeMaxDelta, *mTimeFrame, *mVSync, *mSetVSync, *mTargetFps, *mSetTargetFps, *mScreenW, *mScreenH, *mPrefsGetInt,
     *mListEnabledActions, *mActionEnable, *mActionDisable, *mRender;
+static MethodInfo *mObjInstantiate, *mCpvSetCam, *mGoInParent, *mCamSetOrtho, *mCamSetOrthoSize, *mCamSetNear, *mCamSetFar;
+static void* kGlobal; static int oGlTargetRoot = -1, oGlTargetPoint = -1, oHideRoot = -1;
+static std::set<Il2CppObject*> g_cpvCloned;
+static MethodInfo *mObjName, *mCanvasGetCam, *mCompGO, *mGoLayer, *mGoActive, *mCanvasOrder; static void* kCPV; static int oCpvGlobal = -1, oCpvPasses = -1, oCpvInject = -1, oCpvCam = -1, oCpvUseCam = -1, oPassName = -1, oPassEnabled = -1;
 static MethodInfo* mVolMgrInstance; static int oVolMgrVolumes = -1;
 static int oHdClearMode, oHdBg, oHdVolMask, oHdAA, oVolProfile, oProfComps, oCompActive, oListItems = 0x10, oListSize = 0x18;
 typedef void (*IssuePluginEvent_t)(void* cb, int id);
@@ -210,6 +214,15 @@ static Il2CppObject* NewGameObject(const char* name) {
 }
 static Il2CppObject* AddComp(Il2CppObject* go, void* klass) { return Keep(P<Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(mGoAdd)(go, TypeOf(klass), mGoAdd)); }
 static Il2CppArray* FindAll(void* klass) { return P<Il2CppArray* (*)(Il2CppObject*, MethodInfo*)>(mObjFindAll)(TypeOf(klass), mObjFindAll); }
+
+struct Il2CppStr { void* k; void* m; int32_t len; wchar_t c[1]; };
+static std::string Str(Il2CppObject* so) {
+    if (!so) return "null";
+    Il2CppStr* st = (Il2CppStr*)so; std::string o;
+    for (int i = 0; i < st->len && i < 120; i++) o += st->c[i] < 128 ? (char)st->c[i] : '?';
+    return o;
+}
+static std::string Name(Il2CppObject* o) { return o && mObjName ? Str(GetObj(mObjName, o)) : "null"; }
 
 // ---------------------------------------------------------------- lab snapshots (render thread readback, raw files)
 struct Snap { ID3D11Texture2D* tex; std::string name; };
@@ -251,12 +264,12 @@ static void __stdcall OnSnapEvent(int) {
 // ---------------------------------------------------------------- state
 static bool g_vrOn = true;           // lab: "vr 0" stops eye rendering (flat game)
 static bool g_flatToo = false;       // lab: "flat 1" keeps the game's own flat render while VR runs
-static bool g_wantSnap = false, g_wantInfo = false;
+static bool g_wantSnap = false, g_wantInfo = false, g_wantDumpUi = false;
 static bool g_eyeCheck = false;      // lab: both eyes at the game camera's own pose (zero-difference control)
 static int g_lastFrame = -1, g_framesSeen = 0, g_posedFrame = -1;
 static Il2CppObject *g_eyeCam[2], *g_eyeRT[2], *g_hudCam, *g_hudRT, *g_gameCam;
 static int g_eyeW = 0, g_eyeH = 0;
-static const int kHudW = 1920, kHudH = 1080;
+static int kHudW = 1920, kHudH = 1080;  // the game window's size, read at VR start
 static uint64_t g_snapCount = 0;
 static uint32_t g_renderCalls = 0, g_eyeFrames = 0, g_flatSkipped = 0, g_scanCount = 0;
 static bool g_vrStarted = false;
@@ -357,11 +370,32 @@ static void Scan(int part) {
         int moved = 0;
         for (uintptr_t i = 0; cvs && i < cvs->max_length; i++) {
             Il2CppObject* c = (Il2CppObject*)cvs->data[i]; if (!c || !IB(mCanvasRoot, c)) continue;
-            if (II(mCanvasMode, c) != 0) continue;  // 0 = Screen Space Overlay
-            SetII(mCanvasSetMode, c, 1); SetIO(mCanvasSetCam, c, g_hudCam); SetIF(mCanvasSetPlane, c, 1.0f); moved++;
+            int mode = II(mCanvasMode, c);
+            if (mode == 0) { SetII(mCanvasSetMode, c, 1); SetIO(mCanvasSetCam, c, g_hudCam); SetIF(mCanvasSetPlane, c, 1.0f); moved++; }
+            else if (mode == 1 && g_gameCam && GetObj(mCanvasGetCam, c) == g_gameCam) {
+                // Screen Space Camera bound to the game's camera, which VR leaves out: the HUD camera draws it instead.
+                SetIO(mCanvasSetCam, c, g_hudCam); SetIF(mCanvasSetPlane, c, 1.0f); moved++;
+                Log("HUD canvas \"%s\" was drawn by the game camera: moved to the HUD camera", Name(c).c_str());
+            }
         }
         if (moved) Log("HUD %d overlay canvas(es) moved to the HUD camera (of %d canvases)", moved, cvs ? (int)cvs->max_length : 0);
         double ms = (Now() - t0) * 1000; if (ms > g_scanCanvasMax) g_scanCanvasMax = ms;
+    }
+    // HDRP custom passes that only run on the game's camera (useTargetCamera): one copy per eye camera.
+    if (part == 1 && kCPV && g_gameCam && g_eyeCam[0] && mObjInstantiate && (g_scanCount % 5) == 0) {
+        Il2CppArray* cp = FindAll(kCPV);
+        for (uintptr_t i = 0; cp && i < cp->max_length; i++) {
+            Il2CppObject* v = (Il2CppObject*)cp->data[i];
+            if (!v || g_cpvCloned.count(v) || !Fld<bool>(v, oCpvUseCam) || Fld<Il2CppObject*>(v, oCpvCam) != g_gameCam) continue;
+            g_cpvCloned.insert(v); Keep(v);
+            for (int e = 0; e < 2; e++) {
+                Il2CppObject* cl = P<Il2CppObject* (*)(Il2CppObject*, MethodInfo*)>(mObjInstantiate)(v, mObjInstantiate);
+                if (!cl) continue;
+                g_cpvCloned.insert(Keep(cl));
+                Fld<Il2CppObject*>(cl, oCpvCam) = g_eyeCam[e]; Fld<bool>(cl, oCpvUseCam) = true;
+            }
+            Log("HUD custom pass volume \"%s\" ran on the game camera only: a copy made for each eye", Name(v).c_str());
+        }
     }
     double ms = (Now() - t0) * 1000; if (ms > g_scanMsMax) g_scanMsMax = ms; g_scanCount++;
 }
@@ -416,6 +450,7 @@ static void PollCommands() {
         else if (c == "flat") { int n; ls >> n; g_flatToo = n != 0; }
         else if (c == "recenter") aixr::Recenter();
         else if (c == "gamesettings") LogGameSet("asked");
+        else if (c == "dumpui") g_wantDumpUi = true;
         else if (c == "menu") { menu::g_open = !menu::g_open; Log("MENU %s (lab)", menu::g_open ? "opened" : "closed"); }
         else if (c == "hud") { int n; ls >> n; g_set.hudMode = n; menu::PushHud(); }
         else Log("CMD unknown");
@@ -470,7 +505,14 @@ static void MakeEyes(Il2CppObject* game) {
     P<void (*)(Il2CppObject*, Color, MethodInfo*)>(mCamSetBg)(g_hudCam, Color{0, 0, 0, 0}, mCamSetBg);
     SetII(mCamSetMask, g_hudCam, 1 << 5); SetIF(mCamSetDepth, g_hudCam, 10); SetIO(mCamSetTarget, g_hudCam, g_hudRT);
     Fld<int>(hd, oHdClearMode) = 1 /*Color*/; Fld<Color>(hd, oHdBg) = Color{0, 0, 0, 0}; Fld<int>(hd, oHdVolMask) = 0; Fld<int>(hd, oHdAA) = 0;
-    Log("EYES two eye cameras %dx%d and the HUD camera %dx%d made", g_eyeW, g_eyeH, kHudW, kHudH);
+    // The game places some overlay elements (lock-on marker, damage numbers) by setting their position to screen
+    // pixels, which only works on an overlay canvas. An orthographic HUD camera looking at the rectangle (0,0)-(W,H)
+    // makes world units equal screen pixels, so those elements and the normal layout both land where the game meant.
+    P<void (*)(Il2CppObject*, bool, MethodInfo*)>(mCamSetOrtho)(g_hudCam, true, mCamSetOrtho);
+    SetIF(mCamSetOrthoSize, g_hudCam, kHudH * 0.5f);
+    SetIF(mCamSetNear, g_hudCam, 0.01f); SetIF(mCamSetFar, g_hudCam, 100000.0f);
+    P<void (*)(Il2CppObject*, Vec3, Quat, MethodInfo*)>(mTrSetPosRot)(Transform(g_hudCam), Vec3{kHudW * 0.5f, kHudH * 0.5f, -1.0f}, Quat{0, 0, 0, 1}, mTrSetPosRot);
+    Log("EYES two eye cameras %dx%d and the HUD camera %dx%d made (HUD camera orthographic, 1 unit = 1 screen pixel)", g_eyeW, g_eyeH, kHudW, kHudH);
 }
 
 // Called once per frame before the frame's first render: both eyes from the game camera's pose now plus the head pose.
@@ -569,6 +611,48 @@ static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodIn
     g_hookCpuSum += ms; if (ms > g_hookCpuMax) g_hookCpuMax = ms;
 }
 
+// Lab: every canvas and every HDRP custom pass volume, with what draws it.
+static void DumpUi() {
+    Il2CppArray* cvs = FindAll(kCanvas);
+    for (uintptr_t i = 0; cvs && i < cvs->max_length; i++) {
+        Il2CppObject* c = (Il2CppObject*)cvs->data[i]; if (!c) continue;
+        Il2CppObject* go = GetObj(mCompGO, c); Il2CppObject* cam = GetObj(mCanvasGetCam, c);
+        Log("UIDUMP canvas \"%s\" root %d mode %d camera \"%s\"%s layer %d order %d active %d", Name(c).c_str(), IB(mCanvasRoot, c), II(mCanvasMode, c), Name(cam).c_str(),
+            cam == g_gameCam ? " (the game camera)" : cam == g_hudCam ? " (our HUD camera)" : "", II(mGoLayer, go), II(mCanvasOrder, c), IB(mGoActive, go));
+    }
+    Il2CppArray* cp = kCPV ? FindAll(kCPV) : nullptr;
+    for (uintptr_t i = 0; cp && i < cp->max_length; i++) {
+        Il2CppObject* v = (Il2CppObject*)cp->data[i]; if (!v) continue;
+        Il2CppObject* cam = Fld<Il2CppObject*>(v, oCpvCam);
+        std::string passes;
+        Il2CppObject* list = Fld<Il2CppObject*>(v, oCpvPasses);
+        if (list) { Il2CppArray* it = Fld<Il2CppArray*>(list, oListItems); int n = Fld<int>(list, oListSize);
+            for (int k = 0; k < n; k++) { Il2CppObject* ps = (Il2CppObject*)it->data[k]; if (!ps) continue;
+                passes += std::string(ClassName(ps)) + "(" + Str(Fld<Il2CppObject*>(ps, oPassName)) + (Fld<bool>(ps, oPassEnabled) ? "" : ", off") + ") "; } }
+        Log("UIDUMP custom pass volume \"%s\" global %d useTargetCamera %d camera \"%s\"%s injection %d layer %d: %s", Name(v).c_str(), Fld<bool>(v, oCpvGlobal), Fld<bool>(v, oCpvUseCam),
+            Name(cam).c_str(), cam == g_gameCam ? " (the game camera)" : "", Fld<int>(v, oCpvInject), II(mGoLayer, GetObj(mCompGO, v)), passes.c_str());
+    }
+    // The game's lock-on marker: Global.TargetPointUIRoot (HideUIElement.Root) and Global._TargetPoint.
+    Il2CppArray* gl = kGlobal ? FindAll(kGlobal) : nullptr;
+    for (uintptr_t i = 0; gl && i < gl->max_length; i++) {
+        Il2CppObject* g = (Il2CppObject*)gl->data[i]; if (!g) continue;
+        Il2CppObject* hide = Fld<Il2CppObject*>(g, oGlTargetRoot);
+        Il2CppObject* rootGo = hide ? Fld<Il2CppObject*>(hide, oHideRoot) : nullptr;
+        Il2CppObject* tp = Fld<Il2CppObject*>(g, oGlTargetPoint);
+        Il2CppObject* objs[2] = {rootGo, tp ? GetObj(mCompGO, tp) : nullptr};
+        const char* what[2] = {"TargetPointUIRoot.Root", "_TargetPoint"};
+        for (int k = 0; k < 2; k++) {
+            Il2CppObject* go = objs[k]; if (!go) { Log("UIDUMP Global.%s null", what[k]); continue; }
+            Il2CppObject* tr = P<Il2CppObject* (*)(Il2CppObject*, MethodInfo*)>(FindMethod(kGameObject, "get_transform", 0))(go, FindMethod(kGameObject, "get_transform", 0));
+            Vec3 pos = P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(tr, mTrPos);
+            Il2CppObject* cv = mGoInParent ? P<Il2CppObject* (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(mGoInParent)(go, TypeOf(kCanvas), mGoInParent) : nullptr;
+            Log("UIDUMP Global.%s \"%s\" active %d layer %d pos (%.2f %.2f %.2f), canvas above it \"%s\" mode %d", what[k], Name(go).c_str(), IB(mGoActive, go), II(mGoLayer, go),
+                pos.x, pos.y, pos.z, Name(cv).c_str(), cv ? II(mCanvasMode, cv) : -1);
+        }
+    }
+    Log("UIDUMP %d canvases, %d custom pass volumes", cvs ? (int)cvs->max_length : 0, cp ? (int)cp->max_length : 0);
+}
+
 static void FrameStart(int frame) {
     g_framesSeen++;
     double now = Now();
@@ -581,6 +665,7 @@ static void FrameStart(int frame) {
         g_vrStarted = true;
         LogGameSet("at start");
         KeepPacingOff("at VR start: VSync and the frame limit off, the mod paces the game");
+        kHudW = SI(mScreenW); kHudH = SI(mScreenH); if (kHudW < 640 || kHudH < 360) { kHudW = 1920; kHudH = 1080; }
         aixr::Configure(g_set.picture, g_set.resolution, kHudW, kHudH);
         menu::PushHud();
         aixr::Start();
@@ -591,6 +676,7 @@ static void FrameStart(int frame) {
     if (running && (g_framesSeen % 120) < 2 && g_framesSeen > 2) { try { Scan(g_framesSeen % 120); } catch (...) { Log("SCAN failed (game exception)"); } }
     if (running) Cap(v.periodSec);
     if (running) g_issue(aixr::RenderEventFunc(), 3);  // GPU timestamp: start of this frame's rendering
+    if (g_wantDumpUi) { g_wantDumpUi = false; try { DumpUi(); } catch (...) { Log("UIDUMP failed (game exception)"); } }
     if (g_wantInfo) { g_wantInfo = false; LogGameSet("asked"); Log("INFO frame %d, eyes %dx%d, game camera %p, recenters %u", frame, g_eyeW, g_eyeH, g_gameCam, v.recenters); }
 }
 
@@ -666,6 +752,8 @@ static void Setup() {
     mCamGetDepth = Need(kCamera, "Camera", "get_depth", 0); mCamSetDepth = Need(kCamera, "Camera", "set_depth", 1);
     mCamSetMask = Need(kCamera, "Camera", "set_cullingMask", 1); mCamSetClearFlags = Need(kCamera, "Camera", "set_clearFlags", 1);
     mCamSetBg = Need(kCamera, "Camera", "set_backgroundColor", 1);
+    mCamSetOrtho = Need(kCamera, "Camera", "set_orthographic", 1); mCamSetOrthoSize = Need(kCamera, "Camera", "set_orthographicSize", 1);
+    mCamSetNear = Need(kCamera, "Camera", "set_nearClipPlane", 1); mCamSetFar = Need(kCamera, "Camera", "set_farClipPlane", 1);
     void* kComp = FindClass("UnityEngine", "Component");
     mCompTransform = Need(kComp, "Component", "get_transform", 0); mCompGet = Need(kComp, "Component", "GetComponent", 1, "System.Type");
     void* kTr = FindClass("UnityEngine", "Transform");
@@ -688,6 +776,20 @@ static void Setup() {
     mCanvasSetCam = Need(kCanvas, "Canvas", "set_worldCamera", 1); mCanvasSetPlane = Need(kCanvas, "Canvas", "set_planeDistance", 1);
     mCanvasRoot = Need(kCanvas, "Canvas", "get_isRootCanvas", 0);
     oVolProfile = NeedField(kVolume, "Volume", "sharedProfile");
+    mObjName = Need(kObj, "Object", "get_name", 0); mCompGO = Need(kComp, "Component", "get_gameObject", 0);
+    mGoLayer = Need(kGameObject, "GameObject", "get_layer", 0); mGoActive = Need(kGameObject, "GameObject", "get_activeInHierarchy", 0);
+    mCanvasGetCam = Need(kCanvas, "Canvas", "get_worldCamera", 0); mCanvasOrder = Need(kCanvas, "Canvas", "get_sortingOrder", 0);
+    kCPV = FindClass("UnityEngine.Rendering.HighDefinition", "CustomPassVolume");
+    mObjInstantiate = Need(kObj, "Object", "Instantiate", 1, "UnityEngine.Object");
+    mGoInParent = Need(kGameObject, "GameObject", "GetComponentInParent", 1, "System.Type");
+    kGlobal = FindClass("", "Global");
+    oGlTargetRoot = NeedField(kGlobal, "Global", "TargetPointUIRoot"); oGlTargetPoint = NeedField(kGlobal, "Global", "_TargetPoint");
+    oHideRoot = NeedField(FindClass("", "HideUIElement"), "HideUIElement", "Root");
+    oCpvGlobal = NeedField(kCPV, "CustomPassVolume", "m_IsGlobal"); oCpvPasses = NeedField(kCPV, "CustomPassVolume", "customPasses");
+    oCpvInject = NeedField(kCPV, "CustomPassVolume", "injectionPoint"); oCpvCam = NeedField(kCPV, "CustomPassVolume", "m_TargetCamera");
+    oCpvUseCam = NeedField(kCPV, "CustomPassVolume", "useTargetCamera");
+    void* kPass = FindClass("UnityEngine.Rendering.HighDefinition", "CustomPass");
+    oPassName = NeedField(kPass, "CustomPass", "m_Name"); oPassEnabled = NeedField(kPass, "CustomPass", "enabled");
     void* kVM = FindClass("UnityEngine.Rendering", "VolumeManager");
     mVolMgrInstance = Need(kVM, "VolumeManager", "get_instance", 0); oVolMgrVolumes = NeedField(kVM, "VolumeManager", "m_Volumes");
     void* kProf = FindClass("UnityEngine.Rendering", "VolumeProfile");
