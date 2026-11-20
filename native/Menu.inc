@@ -28,6 +28,8 @@ static void Build() {
     g_tabs = {
         {"GENERAL", {
             {"Recenter", Button, "Puts the view, the HUD and this menu in front of you again, at your current height and facing. The headset's own recenter does the same."},
+            {"World scale", Value, "How big the world feels. 1.00 is life size. Higher makes the world smaller with more 3D depth; lower makes it bigger and flatter. Applies at once."},
+            {"Upscaler", Value, nullptr},
             {"Resolution", Value, nullptr},
             {"Close menu", Button, "Closes the mod menu. Insert or both sticks held also close it."}}},
         {"HUD", {
@@ -35,7 +37,8 @@ static void Build() {
             {"HUD size", Value, "Width of the HUD panel in metres. The game's full-screen menus show on the same panel."},
             {"HUD left / right", Value, "Moves the HUD panel left or right, in metres."},
             {"HUD height", Value, "Moves the HUD panel up or down from eye height, in metres."},
-            {"HUD distance", Value, "How far the HUD panel stands in front of you, in metres."}}},
+            {"HUD distance", Value, "How far the HUD panel stands in front of you, in metres."},
+            {"Lock-on marker height", Value, "Raises or lowers the lock-on marker on the HUD panel, in screen pixels of the game's picture."}}},
         {"MOD MENU", {
             {"Menu size", Value, "Size of this menu. It has its own place, separate from the HUD."},
             {"Menu height", Value, "Moves this menu up or down from eye height, in metres."},
@@ -54,6 +57,9 @@ static void ValueText(const char* label, char* out, size_t n) {
     else if (l == "HUD left / right") sprintf_s(out, n, "%+.2f m", g_set.hudX);
     else if (l == "HUD height") sprintf_s(out, n, "%+.2f m", g_set.hudY);
     else if (l == "HUD distance") sprintf_s(out, n, "%.2f m", g_set.hudDistance);
+    else if (l == "World scale") sprintf_s(out, n, "%.2f", g_set.worldScale);
+    else if (l == "Upscaler") { static const char* u[] = {"TAA", "DLAA", "DLSS Quality", "DLSS Balanced", "DLSS Performance", "DLSS Ultra Perf"}; sprintf_s(out, n, "%s", u[g_set.upscaler % 6]); }
+    else if (l == "Lock-on marker height") sprintf_s(out, n, "%+d px", (int)g_set.lockOnLift);
     else if (l == "Menu size") sprintf_s(out, n, "%d%%", (int)lroundf(g_set.menuSize * 100));
     else if (l == "Menu height") sprintf_s(out, n, "%+.2f m", g_set.menuHeight);
     else if (l == "Menu distance") sprintf_s(out, n, "%.2f m", g_set.menuDistance);
@@ -70,6 +76,9 @@ static void Change(const char* label, int dir) {
     else if (l == "HUD left / right") g_set.hudX = Clamp(g_set.hudX + dir * 0.02f, -1.5f, 1.5f);
     else if (l == "HUD height") g_set.hudY = Clamp(g_set.hudY + dir * 0.02f, -1.5f, 1.5f);
     else if (l == "HUD distance") g_set.hudDistance = Clamp(g_set.hudDistance + dir * 0.05f, 0.4f, 5.0f);
+    else if (l == "World scale") { float st = g_set.worldScale + dir * 0.01f >= 2.0f ? 0.25f : 0.05f; g_set.worldScale = Clamp(roundf((g_set.worldScale + dir * st) * 100) / 100, 0.25f, 10.0f); }
+    else if (l == "Upscaler") { g_set.upscaler = (g_set.upscaler + 6 + dir) % 6; ApplyUpscaler("menu"); }
+    else if (l == "Lock-on marker height") g_set.lockOnLift = Clamp(g_set.lockOnLift + dir * 5, -300, 300);
     else if (l == "Menu size") g_set.menuSize = Clamp(roundf((g_set.menuSize + dir * 0.05f) * 20) / 20, 0.5f, 2.0f);
     else if (l == "Menu height") g_set.menuHeight = Clamp(g_set.menuHeight + dir * 0.02f, -0.6f, 0.6f);
     else if (l == "Menu distance") g_set.menuDistance = Clamp(g_set.menuDistance + dir * 0.05f, 0.3f, 2.0f);
@@ -105,6 +114,8 @@ static void Snapshot() {
     else if (l == "Resolution")
         sprintf_s(s.explain, "Sharpness of the 3D picture. 100%% is the size your headset asks for. Running now: %dx%d per eye. Next launch: %dx%d. Takes effect the next time you start the game.",
                   g_eyeW, g_eyeH, NextW(), NextH());
+    else if (l == "Upscaler")
+        sprintf_s(s.explain, "How each eye is drawn. TAA: the game's own smoothing at full size. DLAA: NVIDIA's at full size, sharper. DLSS Quality to Ultra Performance: each eye drawn smaller and rebuilt by NVIDIA DLSS for more frame rate (RTX cards). Applies at once. Now: %s.", DlssStatus());
     else if (l == "HUD mode")
         strcpy_s(s.explain, g_set.hudMode == 0 ? "Fixed: the HUD stays in place in the room, in front of where you recentered. Look at it when you need it."
                           : g_set.hudMode == 1 ? "Follows head: the HUD stays in front of your eyes wherever you look."

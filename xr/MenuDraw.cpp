@@ -75,27 +75,29 @@ ID3D11ShaderResourceView* DrawMenu(ID3D11Device* dev, ID3D11DeviceContext* ctx, 
     dl->AddLine(ImVec2(0, 84), ImVec2((float)kW, 84), red, 2.0f);
     float y = 104;
     if (m.banner[0]) { dl->AddText(g_fSmall, g_fSmall->LegacySize, ImVec2(48, y), Col(1, 0.45f, 0.4f, 1), m.banner, nullptr, kW - 96.0f); y += 70; }
-    // Tabs down the left, like the game's settings categories.
-    float ty = y + 8;
+    // Tabs along the top, like the game's pause menu (STATUS, EQUIPMENT, ...), with the bumper hints at the ends.
+    float tx0 = 120, tx1 = kW - 120.0f, tw = m.tabCount ? (tx1 - tx0) / m.tabCount : 0;
+    Text(dl, g_fSmall, 48, y + 12, grey, "LB");
+    Text(dl, g_fSmall, kW - 48 - Width(g_fSmall, "RB"), y + 12, grey, "RB");
     for (int i = 0; i < m.tabCount; i++) {
         bool on = i == m.tab;
-        RowBox(dl, 40, ty, 330, ty + 56, on);
-        Text(dl, g_fText, 185 - Width(g_fText, m.tabs[i]) * 0.5f, ty + 9, on ? white : grey, m.tabs[i]);
-        ty += 72;
+        float cx = tx0 + tw * (i + 0.5f);
+        Text(dl, g_fText, cx - Width(g_fText, m.tabs[i]) * 0.5f, y + 6, on ? white : grey, m.tabs[i]);
+        if (on) dl->AddLine(ImVec2(cx - Width(g_fText, m.tabs[i]) * 0.5f, y + 52), ImVec2(cx + Width(g_fText, m.tabs[i]) * 0.5f, y + 52), white, 2.0f);
     }
-    // Rows on the right: label left, value right with < > like the game's option rows.
-    float x0 = 370, x1 = kW - 40, ry = y + 8;
+    // Rows below: label left, value right with < > like the game's option rows.
+    float x0 = 60, x1 = kW - 60.0f, ry = y + 76;
     for (int i = 0; i < m.rowCount; i++) {
         bool on = i == m.row;
-        RowBox(dl, x0, ry, x1, ry + 56, on);
+        RowBox(dl, x0, ry, x1, ry + 50, on);
         ImU32 c = on ? white : grey;
-        Text(dl, g_fText, x0 + 24, ry + 9, c, m.rows[i].label);
+        Text(dl, g_fText, x0 + 24, ry + 6, c, m.rows[i].label);
         if (m.rows[i].value[0]) {
-            float vw = Width(g_fText, m.rows[i].value), vx = x1 - 200 - vw * 0.5f;
-            Text(dl, g_fText, vx, ry + 9, c, m.rows[i].value);
-            if (!m.rows[i].button) { Text(dl, g_fText, x1 - 330, ry + 9, c, "<"); Text(dl, g_fText, x1 - 60, ry + 9, c, ">"); }
+            float vw = Width(g_fText, m.rows[i].value), vx = x1 - 230 - vw * 0.5f;
+            Text(dl, g_fText, vx, ry + 6, c, m.rows[i].value);
+            if (!m.rows[i].button) { Text(dl, g_fText, x1 - 420, ry + 6, c, "<"); Text(dl, g_fText, x1 - 60, ry + 6, c, ">"); }
         }
-        ry += 66;
+        ry += 58;
     }
     // Footer: dark red rule, explanation bottom left, button hints bottom right.
     dl->AddLine(ImVec2(0, kH - 170.0f), ImVec2((float)kW, kH - 170.0f), red, 2.0f);

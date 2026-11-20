@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.1.0"
-#define MOD_BUILD 1
+#define MOD_VERSION "0.3.0"
+#define MOD_BUILD 3
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -50,7 +50,9 @@ struct Settings {
     float hudWidth = 1.6f, hudX = 0.0f, hudY = -0.05f, hudDistance = 1.6f;
     float menuSize = 1.0f, menuHeight = 0.0f, menuDistance = 0.9f;
     int blockNetwork = 1;       // the game's internet connections are refused and logged
-    float worldScale = 1.0f;    // game metres per real metre of head movement (fixed in Phase 1)
+    float worldScale = 1.0f;    // game metres per real metre of head movement and eye gap (1 life size, higher: smaller world, more depth)
+    int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
+    float lockOnLift = 0;       // lock-on marker raised by this many screen pixels
 };
 static Settings g_set;
 static std::wstring IniPath() { return g_gameDir + L"AILimitVR\\AILimitVR.ini"; }
@@ -63,6 +65,7 @@ static void IniW(const wchar_t* sec, const wchar_t* key, float v) {
 }
 static void LoadSettings() {
     g_set.resolution = IniF(L"VR", L"Resolution", 1.0f);
+    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 0);
     g_set.picture = (int)IniF(L"VR", L"Picture", 0);
     g_set.hudMode = (int)IniF(L"HUD", L"Mode", 0);
     g_set.hudWidth = IniF(L"HUD", L"Size", 1.6f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
@@ -72,6 +75,7 @@ static void LoadSettings() {
 }
 static void SaveSettings() {
     IniW(L"VR", L"Resolution", g_set.resolution); IniW(L"VR", L"Picture", (float)g_set.picture);
+    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift);
     IniW(L"HUD", L"Mode", (float)g_set.hudMode); IniW(L"HUD", L"Size", g_set.hudWidth); IniW(L"HUD", L"X", g_set.hudX);
     IniW(L"HUD", L"Height", g_set.hudY); IniW(L"HUD", L"Distance", g_set.hudDistance);
     IniW(L"Menu", L"Size", g_set.menuSize); IniW(L"Menu", L"Height", g_set.menuHeight); IniW(L"Menu", L"Distance", g_set.menuDistance);
@@ -299,6 +303,65 @@ static void BlockGameInput(bool block) {
     }
 }
 
+// ---------------------------------------------------------------- upscaler per eye (HDRP's own DLSS)
+static int oHdAllowDyn = -1, oHdAllowDlss = -1, oHdDlssCustomQ = -1, oHdDlssQ = -1, oHdDlssCustomAttr = -1, oHdDlssOptimal = -1;
+static int oAssetSettings = -1, oDynRes = -1, oDynEnabled = -1, oDynDlss = -1;
+static MethodInfo *mCamSetAllowDyn, *mDrhInstance, *mDrhScale;
+static char g_dlssStatus[160] = "not applied yet";
+static const char* DlssStatus() { return g_dlssStatus; }
+static void ApplyUpscaler(const char* why) {
+    if (!g_eyeCam[0] || oHdAllowDlss < 0) { sprintf_s(g_dlssStatus, "waiting for the eye cameras"); return; }
+    int u = g_set.upscaler;
+    bool dlss = u >= 1;
+    // DLSS in HDRP needs dynamic resolution and DLSS switched on in the render pipeline asset (the game's DLAA uses it).
+    Il2CppObject* asset = nullptr;
+    void* kGS = FindClass("UnityEngine.Rendering", "GraphicsSettings");
+    MethodInfo* mCur = kGS ? FindMethod(kGS, "get_currentRenderPipeline", 0) : nullptr;
+    if (mCur) asset = P<Il2CppObject* (*)(MethodInfo*)>(mCur)(mCur);
+    bool assetDyn = false, assetDlss = false;
+    if (asset && oAssetSettings >= 0) {
+        uint8_t* dyn = (uint8_t*)asset + oAssetSettings + oDynRes;
+        assetDyn = dyn[oDynEnabled] != 0; assetDlss = dyn[oDynDlss] != 0;
+        if (dlss && (!assetDyn || !assetDlss)) { dyn[oDynEnabled] = 1; dyn[oDynDlss] = 1; Log("UPSCALER render pipeline asset: dynamic resolution %d -> 1, DLSS %d -> 1", assetDyn, assetDlss); }
+    }
+    static const uint32_t q[6] = {0, 5, 2, 1, 0, 3};  // TAA, DLAA, MaximumQuality, Balanced, MaximumPerformance, UltraPerformance (NVIDIA enum)
+    for (int e = 0; e < 2; e++) {
+        Il2CppObject* hd = GetComp(g_eyeCam[e], kHDCam); if (!hd) continue;
+        Fld<bool>(hd, oHdAllowDlss) = dlss; Fld<bool>(hd, oHdAllowDyn) = dlss;
+        Fld<bool>(hd, oHdDlssCustomQ) = true; Fld<uint32_t>(hd, oHdDlssQ) = q[u];
+        Fld<bool>(hd, oHdDlssCustomAttr) = true; Fld<bool>(hd, oHdDlssOptimal) = true;
+        if (u == 0) Fld<int>(hd, oHdAA) = 2;  // TAA
+        P<void (*)(Il2CppObject*, bool, MethodInfo*)>(mCamSetAllowDyn)(g_eyeCam[e], dlss, mCamSetAllowDyn);
+    }
+    static const char* names[] = {"TAA", "DLAA", "DLSS Quality", "DLSS Balanced", "DLSS Performance", "DLSS Ultra Performance"};
+    sprintf_s(g_dlssStatus, "%s", names[u]);
+    Log("UPSCALER %s (%s): eyes allowDLSS %d quality %u, asset dynamic resolution was %d DLSS was %d", names[u], why, dlss, q[u], assetDyn, assetDlss);
+}
+static float DrsScale() {
+    if (!mDrhInstance || !mDrhScale) return -1;
+    Il2CppObject* h = P<Il2CppObject* (*)(MethodInfo*)>(mDrhInstance)(mDrhInstance);
+    return h ? P<float (*)(Il2CppObject*, MethodInfo*)>(mDrhScale)(h, mDrhScale) : -1;
+}
+
+// ---------------------------------------------------------------- lock-on marker lift (Steve, build 2: a touch too low)
+static Il2CppObject* g_markerTr; static Vec3 g_markerWritten{1e9f, 0, 0};
+static MethodInfo* mTrSetPos;
+static void LiftMarker() {
+    if (g_set.lockOnLift == 0 || !kGlobal) return;
+    try {
+        if (!g_markerTr) {
+            Il2CppArray* gl = FindAll(kGlobal);
+            if (gl && gl->max_length) { Il2CppObject* tp = Fld<Il2CppObject*>((Il2CppObject*)gl->data[0], oGlTargetPoint); if (tp) g_markerTr = Keep(tp); }
+            if (!g_markerTr) return;
+        }
+        Vec3 p = P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(g_markerTr, mTrPos);
+        if (p.x == g_markerWritten.x && p.y == g_markerWritten.y && p.z == g_markerWritten.z) return;  // the game did not move it since our lift
+        p.y += g_set.lockOnLift;
+        P<void (*)(Il2CppObject*, Vec3, MethodInfo*)>(mTrSetPos)(g_markerTr, p, mTrSetPos);
+        g_markerWritten = P<Vec3 (*)(Il2CppObject*, MethodInfo*)>(mTrPos)(g_markerTr, mTrPos);
+    } catch (...) { g_markerTr = nullptr; }
+}
+
 #include "Menu.inc"
 
 static int Pref(const char* key, int def) { return P<int (*)(Il2CppObject*, int, MethodInfo*)>(mPrefsGetInt)(il2cpp_string_new(key), def, mPrefsGetInt); }
@@ -381,22 +444,7 @@ static void Scan(int part) {
         if (moved) Log("HUD %d overlay canvas(es) moved to the HUD camera (of %d canvases)", moved, cvs ? (int)cvs->max_length : 0);
         double ms = (Now() - t0) * 1000; if (ms > g_scanCanvasMax) g_scanCanvasMax = ms;
     }
-    // HDRP custom passes that only run on the game's camera (useTargetCamera): one copy per eye camera.
-    if (part == 1 && kCPV && g_gameCam && g_eyeCam[0] && mObjInstantiate && (g_scanCount % 5) == 0) {
-        Il2CppArray* cp = FindAll(kCPV);
-        for (uintptr_t i = 0; cp && i < cp->max_length; i++) {
-            Il2CppObject* v = (Il2CppObject*)cp->data[i];
-            if (!v || g_cpvCloned.count(v) || !Fld<bool>(v, oCpvUseCam) || Fld<Il2CppObject*>(v, oCpvCam) != g_gameCam) continue;
-            g_cpvCloned.insert(v); Keep(v);
-            for (int e = 0; e < 2; e++) {
-                Il2CppObject* cl = P<Il2CppObject* (*)(Il2CppObject*, MethodInfo*)>(mObjInstantiate)(v, mObjInstantiate);
-                if (!cl) continue;
-                g_cpvCloned.insert(Keep(cl));
-                Fld<Il2CppObject*>(cl, oCpvCam) = g_eyeCam[e]; Fld<bool>(cl, oCpvUseCam) = true;
-            }
-            Log("HUD custom pass volume \"%s\" ran on the game camera only: a copy made for each eye", Name(v).c_str());
-        }
-    }
+    // (Custom pass volumes: all global in this game, dumpui 2026-11-20; a per-frame search cost 6 ms, so none here.)
     double ms = (Now() - t0) * 1000; if (ms > g_scanMsMax) g_scanMsMax = ms; g_scanCount++;
 }
 
@@ -417,9 +465,9 @@ static void Periodic() {
     if (g_vrStarted && fabs(speed - 1.0) > 0.05 && SF(mTimeScale) > 0.99) Log("SPEED WARNING: game time runs at %.2f of real time", speed);
     aixr::Stats s; aixr::TakeStats(&s);
     double cpu = g_frames ? (g_frameSum - g_capWaitSum) / g_frames : 0;
-    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f)",
+    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f) | upscaler %s, resolution scale now %.2f",
         frames ? dt * 1000 / frames : 0, g_frameMax, cpu, s.gpuMsAvg, s.gpuMsMax, s.gpuSamples, g_capped ? g_capWaitSum / g_capped : 0, g_capWaitMax,
-        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax); g_scanVolMax = g_scanCanvasMax = 0;
+        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax, g_dlssStatus, DrsScale()); g_scanVolMax = g_scanCanvasMax = 0;
     Log("XRSTAT state %d session %d focused %d, xr frames %u (no new image %u, layers sent %u), queued %u copied %u skipped busy %u no slot %u, copy max %.2f ms, xrWaitFrame avg %.2f max %.2f ms, xrEndFrame avg %.2f max %.2f ms, layer %d",
         aixr::GetState(), v.sessionState, v.focused, s.xrFrames, s.xrNoNewImage, s.layersSent, s.queued, s.copied, s.skippedBusy, s.skippedNoSlots, s.copyMsMax,
         s.waitMsAvg, s.waitMsMax, s.endMsAvg, s.endMsMax, aixr::LayerInUse());
@@ -497,6 +545,7 @@ static void MakeEyes(Il2CppObject* game) {
         g_eyeCam[e] = AddComp(go, kCamera); AddComp(go, kHDCam);
     }
     CopyGameCamera(game);
+    ApplyUpscaler("start");
     // HUD camera: renders the game's overlay canvases (layer 5, UI) into a see-through texture; no volumes, no AA.
     g_hudRT = MakeRT(kHudW, kHudH, "AILVR_HUD");
     Il2CppObject* go = NewGameObject("AILVR_HudCam");
@@ -575,10 +624,10 @@ static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodIn
     }
     if (game) {
         if (!g_eyeCam[0]) MakeEyes(game);
-        else if (game != g_gameCam) CopyGameCamera(game);
+        else if (game != g_gameCam) { CopyGameCamera(game); ApplyUpscaler("game camera changed"); }
         g_gameCam = game;
     }
-    if (g_gameCam && g_posedFrame != frame) { g_posedFrame = frame; PoseEyes(g_gameCam); }
+    if (g_gameCam && g_posedFrame != frame) { g_posedFrame = frame; LiftMarker(); PoseEyes(g_gameCam); }
     // Leave the game's own flat render out while VR runs.
     bool removed = false;
     if (gameIdx >= 0 && !g_flatToo) {
@@ -782,6 +831,20 @@ static void Setup() {
     kCPV = FindClass("UnityEngine.Rendering.HighDefinition", "CustomPassVolume");
     mObjInstantiate = Need(kObj, "Object", "Instantiate", 1, "UnityEngine.Object");
     mGoInParent = Need(kGameObject, "GameObject", "GetComponentInParent", 1, "System.Type");
+    mTrSetPos = Need(kTr, "Transform", "set_position", 1); mCamSetAllowDyn = Need(kCamera, "Camera", "set_allowDynamicResolution", 1);
+    oHdAllowDyn = NeedField(kHDCam, "HDAdditionalCameraData", "allowDynamicResolution"); oHdAllowDlss = NeedField(kHDCam, "HDAdditionalCameraData", "allowDeepLearningSuperSampling");
+    oHdDlssCustomQ = NeedField(kHDCam, "HDAdditionalCameraData", "deepLearningSuperSamplingUseCustomQualitySettings"); oHdDlssQ = NeedField(kHDCam, "HDAdditionalCameraData", "deepLearningSuperSamplingQuality");
+    oHdDlssCustomAttr = NeedField(kHDCam, "HDAdditionalCameraData", "deepLearningSuperSamplingUseCustomAttributes"); oHdDlssOptimal = NeedField(kHDCam, "HDAdditionalCameraData", "deepLearningSuperSamplingUseOptimalSettings");
+    void* kAsset = FindClass("UnityEngine.Rendering.HighDefinition", "HDRenderPipelineAsset");
+    oAssetSettings = NeedField(kAsset, "HDRenderPipelineAsset", "m_RenderPipelineSettings");
+    void* kRPS = FindClass("UnityEngine.Rendering.HighDefinition", "RenderPipelineSettings");
+    int d = NeedField(kRPS, "RenderPipelineSettings", "dynamicResolutionSettings"); oDynRes = d >= 0x10 ? d - 0x10 : d;  // value-type field offsets count the object header
+    void* kDyn = FindClass("UnityEngine.Rendering", "GlobalDynamicResolutionSettings");
+    int a = NeedField(kDyn, "GlobalDynamicResolutionSettings", "enabled"), b = NeedField(kDyn, "GlobalDynamicResolutionSettings", "enableDLSS");
+    oDynEnabled = a >= 0x10 ? a - 0x10 : a; oDynDlss = b >= 0x10 ? b - 0x10 : b;
+    Log("HOOKMAP DLSS settings at asset+0x%X+0x%X (+%d enabled, +%d DLSS); the dump says dynamicResolutionSettings 0x15C, enabled 0, enableDLSS 2", oAssetSettings, oDynRes, oDynEnabled, oDynDlss);
+    void* kDrh = FindClass("UnityEngine.Rendering", "DynamicResolutionHandler");
+    mDrhInstance = Need(kDrh, "DynamicResolutionHandler", "get_instance", 0); mDrhScale = Need(kDrh, "DynamicResolutionHandler", "GetCurrentScale", 0);
     kGlobal = FindClass("", "Global");
     oGlTargetRoot = NeedField(kGlobal, "Global", "TargetPointUIRoot"); oGlTargetPoint = NeedField(kGlobal, "Global", "_TargetPoint");
     oHideRoot = NeedField(FindClass("", "HideUIElement"), "HideUIElement", "Root");
