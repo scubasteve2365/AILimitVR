@@ -5,7 +5,7 @@
 // HDRenderPipeline.Render call, in the same game tick, at the game camera's pose plus each eye's head pose. The game's
 // own camera is left out of that call while VR runs (saves a full render). The game's overlay canvases (HUD and menus)
 // render through our own UI camera into a texture shown as a panel. OpenXR runs on its own thread (xr\AIXR.cpp).
-// Feasibility findings this rests on: RE_NOTES.md "Feasibility evening". MinHook (TsudaKageyu, BSD-2) is compiled in.
+// Built on a feasibility test: two eye cameras render identical pictures at the same pose. MinHook (TsudaKageyu, BSD-2) is compiled in.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -25,8 +25,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.5.0"
-#define MOD_BUILD 5
+#define MOD_VERSION "1.0"
+#define MOD_BUILD 10
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -45,7 +45,7 @@ static void Log(const char* fmt, ...) {
 
 // ---------------------------------------------------------------- settings (AILimitVR\AILimitVR.ini)
 struct Settings {
-    float resolution = 0.95f;   // defaults: Steve's RigA settings at the gate (2026-11-20)
+    float resolution = 0.95f;   // defaults: the author's settings at the performance gate (2026-11-20)
     int picture = 0;            // 0 Auto, 1 Steady, 2 Panel
     int hudMode = 0;            // 0 Fixed, 1 Follows head, 2 Hidden
     float hudWidth = 1.85f, hudX = 0.0f, hudY = -0.17f, hudDistance = 1.25f;
@@ -53,11 +53,12 @@ struct Settings {
     int blockNetwork = 1;       // the game's internet connections are refused and logged
     float worldScale = 1.0f;    // game metres per real metre of head movement and eye gap (1 life size, higher: smaller world, more depth)
     int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
-    float lockOnLift = 150;     // lock-on marker raised by this many screen pixels (Steve's value, 2026-11-20)
+    float lockOnLift = 150;     // lock-on marker raised by this many screen pixels (tested value, 2026-11-20)
     int menuSound = 1;          // 0 Off, 1 Low, 2 Medium, 3 High
-    int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down (Steve, 2026-11-20)
+    int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down
 };
 static Settings g_set;
+static int g_labCommands = 0;  // [Lab] Commands=1 in AILimitVR.ini turns the test command file on (off for players)
 static std::wstring IniPath() { return g_gameDir + L"AILimitVR\\AILimitVR.ini"; }
 static float IniF(const wchar_t* sec, const wchar_t* key, float def) {
     wchar_t b[64], d[64]; swprintf_s(d, L"%g", def);
@@ -75,6 +76,7 @@ static void LoadSettings() {
     g_set.hudY = IniF(L"HUD", L"Height", -0.17f); g_set.hudDistance = IniF(L"HUD", L"Distance", 1.25f);
     g_set.menuSize = IniF(L"Menu", L"Size", 1.0f); g_set.menuHeight = IniF(L"Menu", L"Height", 0.0f); g_set.menuDistance = IniF(L"Menu", L"Distance", 0.9f);
     g_set.blockNetwork = (int)IniF(L"Network", L"Block", 1);
+    g_labCommands = (int)IniF(L"Lab", L"Commands", 0);
 }
 static void SaveSettings() {
     IniW(L"VR", L"Resolution", g_set.resolution); IniW(L"VR", L"Picture", (float)g_set.picture);
@@ -346,11 +348,11 @@ static float DrsScale() {
     return h ? P<float (*)(Il2CppObject*, MethodInfo*)>(mDrhScale)(h, mDrhScale) : -1;
 }
 
-// ---------------------------------------------------------------- lock-on marker lift (Steve, build 2: a touch too low)
+// ---------------------------------------------------------------- lock-on marker lift (the orb sat a touch low in VR)
 static Vec3 g_markerWritten{1e9f, 0, 0};
 static MethodInfo* mTrSetPos;
 // The lift is applied right after the game positions the marker (Global.DealTargetPoint), before Unity rebuilds the
-// canvases for this frame. Build 3 applied it at render time, after the rebuild, so it never showed (Steve, 2026-11-20).
+// canvases for this frame. Build 3 applied it at render time, after the rebuild, so it never showed.
 static MethodInfo* mGoTransform;
 typedef void (*Deal_t)(Il2CppObject*, MethodInfo*);
 static Deal_t oDeal;
@@ -460,7 +462,7 @@ static bool SetGame(const char* why, const std::vector<std::pair<int, int>>& val
         LogGraphic((std::string(why) + " (before)").c_str(), g);
         for (auto& v : vals) P<void (*)(Il2CppObject*, int, int, MethodInfo*)>(mGoChange)(g, v.first, v.second, mGoChange);
         P<void (*)(Il2CppObject*, MethodInfo*)>(mGoApplyVals)(g, mGoApplyVals);
-        // VSync did not take through ChangeGraphicValue on RigB (stayed 1): also through the property setters.
+        // VSync did not take through ChangeGraphicValue in testing (stayed 1): also through the property setters.
         for (auto& v : vals) if ((v.first == 0 || v.first == 1) && mGoSet[v.first]) P<void (*)(Il2CppObject*, int, MethodInfo*)>(mGoSet[v.first])(g, v.second, mGoSet[v.first]);
         LogGraphic((std::string(why) + " (after)").c_str(), g);
     } catch (...) { Log("GAMESET %s: the game refused a value (exception)", why); return false; }
@@ -608,7 +610,9 @@ static void Periodic() {
     if (g_vrStarted) KeepPacingOff("the game turned VSync or a frame cap on during VR. Turned off again: the mod paces the game");
 }
 
+
 static void PollCommands() {
+    if (!g_labCommands) return;
     std::wstring path = g_gameDir + L"vrlab_command.txt";
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
     std::ifstream f(path);
@@ -850,7 +854,7 @@ static void FrameStart(int frame) {
     Periodic();
     static bool flatChecked = false;
     if (!flatChecked) {
-        // Lab test switch for RigA (one launch only): AILimitVR\test_flat.txt runs this launch without VR at all.
+        // Test switch (one launch only): AILimitVR\test_flat.txt runs this launch without VR at all.
         flatChecked = true;
         std::wstring f = g_gameDir + L"AILimitVR\\test_flat.txt";
         if (GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES) { DeleteFileW(f.c_str()); g_vrOn = false; Log("TEST this launch runs flat, no OpenXR at all (test_flat.txt found and removed)"); }
@@ -1096,7 +1100,7 @@ static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 // Crash dumps for the lab: our own minidump at the first fatal exception, and copies of Unity's crash dumps from
-// %TEMP%\SenseGames\AILIMIT\Crashes, both into AILimitVR\crashes in the game folder where the RigA watcher can read them.
+// %TEMP%\SenseGames\AILIMIT\Crashes, both into AILimitVR\crashes in the game folder where they are easy to find and send.
 #include <dbghelp.h>
 static void WriteDump(EXCEPTION_POINTERS* e) {
     HMODULE dh = LoadLibraryW(L"dbghelp.dll"); if (!dh) return;

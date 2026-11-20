@@ -1,7 +1,7 @@
 // Mod menu (Phase 1 rows only), included by AILimitVRNative.cpp. Runs on the game's main thread; the XR thread draws
 // the snapshot (xr\MenuDraw.cpp). Ported from Ori WotW VR's Menu.inc (same author, MIT).
-// Opens with both sticks held 0.5 s on an Xbox pad, or Insert (not in the game's key bindings, RE_NOTES "Input
-// bindings"). While it is open the game's input actions are switched off, so the game gets no pad or keyboard input;
+// Opens with both sticks held 0.5 s on an Xbox pad, or Insert (not in the game's key
+// bindings). While it is open the game's input actions are switched off, so the game gets no pad or keyboard input;
 // after closing they come back once every key and button is released. The menu reads the pad itself through XInput.
 
 namespace menu {
@@ -144,7 +144,7 @@ static void Snapshot() {
     else if (l == "Upscaler")
         sprintf_s(s.explain, "How each eye is drawn. TAA: the game's own smoothing at full size. DLAA: NVIDIA's at full size, sharper. DLSS Quality to Ultra Performance: each eye drawn smaller and rebuilt by NVIDIA DLSS for more frame rate (RTX cards). Applies at once. Now: %s.", DlssStatus());
     else if (l == "Picture")
-        strcpy_s(s.explain, "How the HUD and this menu are shown. Auto picks for your VR software: drawn into the 3D picture on Virtual Desktop (steadier there), separate sharp panels on SteamVR. Steady and Panel force one. Applies at once.");
+        strcpy_s(s.explain, "How the HUD and this menu are shown. Auto (recommended) uses Steady on Virtual Desktop (Quest) and Panel on SteamVR (Pimax, Index, Vive and others). Steady draws them into the 3D picture: rock steady on Virtual Desktop. Panel shows them as separate sharp panels: best on SteamVR, but Virtual Desktop squashes them when you turn your head.");
     else if (l == "Load VR baseline settings")
         strcpy_s(s.explain, (g_armed == l && Now() - g_armedAt < 5) ? "Press A again to confirm. Sets the game's graphics back to its own defaults with VSync, LOCK FPS, motion blur and ambient occlusion off." : "Sets the game's own graphics settings back to what VR needs: its default quality, with VSync, LOCK FPS, motion blur and ambient occlusion off. Your mod settings are not touched. Press twice to confirm.");
     else if (l == "Load best VR performance")
@@ -154,7 +154,7 @@ static void Snapshot() {
                           : g_set.hudMode == 1 ? "Follows head: the HUD stays in front of your eyes wherever you look."
                                                : "Hidden: no HUD panel. The game's full-screen menus are hidden too while this is set.");
     strcpy_s(s.footer, "A Select    B Close    LB / RB Tabs");
-    sprintf_s(s.version, "%s  build %d", MOD_VERSION, MOD_BUILD);
+    sprintf_s(s.version, "%s", MOD_VERSION);
     if (aixr::GetState() == aixr::Failed)
         sprintf_s(s.banner, "VR DID NOT START (OpenXR error %d). Start SteamVR or Virtual Desktop first, then restart the game. The log AILimitVR.log in the game folder has the details.", aixr::LastError());
     s.size = g_set.menuSize; s.height = g_set.menuHeight; s.distance = g_set.menuDistance;

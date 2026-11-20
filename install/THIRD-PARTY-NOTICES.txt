@@ -1,0 +1,22 @@
+AI Limit VR includes these parts. Their licences are in the licences folder.
+
+OpenXR loader 1.1.65 (Khronos Group), unmodified
+  https://github.com/KhronosGroup/OpenXR-SDK-Source
+  Apache-2.0.
+
+MinHook (Tsuda Kageyu), compiled into AILimitVRNative.dll
+  https://github.com/TsudaKageyu/minhook
+  BSD 2-Clause. Includes Hacker Disassembler Engine 64 (Vyacheslav Patkov), BSD 2-Clause.
+
+Dear ImGui 1.93.0 (Omar Cornut), compiled into AILimitVRNative.dll, draws the settings menu
+  https://github.com/ocornut/imgui
+  MIT.
+
+The OpenXR side (own XR thread, shared picture ring, flat panel layers) and the winhttp.dll proxy come from
+Ori & the Will of the Wisps VR and Cuphead VR by the same author (MIT).
+
+The menu text uses Georgia from Windows' own font folder. No font files are included.
+
+NVIDIA DLSS is the game's own (it ships with AI LIMIT); the mod only switches it on for each eye.
+
+AI LIMIT belongs to Sense Games and CE-Asia. This mod contains no game files.

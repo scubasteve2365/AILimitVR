@@ -139,7 +139,7 @@ static bool CreateDeviceForRuntime(const LUID& want) {
     IDXGIFactory1* f = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&f))) return false;
     IDXGIAdapter1* chosen = nullptr; IDXGIAdapter1* a = nullptr;
-    bool zero = want.HighPart == 0 && want.LowPart == 0;  // RigB's null driver reports zero
+    bool zero = want.HighPart == 0 && want.LowPart == 0;  // SteamVR's null driver reports zero
     for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
         DXGI_ADAPTER_DESC1 d; a->GetDesc1(&d);
         bool match = !zero && d.AdapterLuid.HighPart == want.HighPart && d.AdapterLuid.LowPart == want.LowPart;
@@ -152,7 +152,7 @@ static bool CreateDeviceForRuntime(const LUID& want) {
     if (chosen) chosen->Release();
     if (FAILED(hr)) { Log("XR device creation failed %08lx", (unsigned long)hr); return false; }
     // The runtime may use this device's immediate context from its own threads (Virtual Desktop's submit path does
-    // d3d11 work inside xrEndFrame and crashed on Steve's Quest 3 with a freed pointer): serialise every call on it.
+    // d3d11 work inside xrEndFrame and crashed on a Quest 3 with a freed pointer): serialise every call on it.
     ID3D11Multithread* mt = nullptr;
     if (SUCCEEDED(g_ctx->QueryInterface(__uuidof(ID3D11Multithread), (void**)&mt)) && mt) { BOOL was = mt->SetMultithreadProtected(TRUE); mt->Release(); Log("XR device multithread protection on (was %d)", was); }
     else Log("XR device multithread protection NOT available");
@@ -288,7 +288,7 @@ static bool StartXr() {
     PFN_xrCreateInstance createInstance; if (!GetFn("xrCreateInstance", createInstance)) return false;
     const char* exts[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
-    strcpy_s(ici.applicationInfo.applicationName, "AI Limit VR");  // the name SteamVR shows (Steve, 2026-11-20)
+    strcpy_s(ici.applicationInfo.applicationName, "AI Limit VR");  // the name SteamVR shows
     ici.applicationInfo.applicationVersion = 1;
     strcpy_s(ici.applicationInfo.engineName, "Unity 2022.3 HDRP");
     ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
@@ -425,8 +425,8 @@ static ID3D11Device* g_gameDev; static ID3D11DeviceContext* g_gameCtx;
 // (event 1), read back a few frames later. Never waits on the GPU.
 struct GpuQ { ID3D11Query *dis = nullptr, *t0 = nullptr, *t1 = nullptr; bool open = false, ended = false; };
 static GpuQ g_gq[6]; static int g_gqi = 0;
-// Off on Virtual Desktop: it hooks the game's D3D11 work, and its hook crashed on Steve's Quest 3 (freed pointer on the
-// game's render thread). Ori WotW VR, the same design without these queries, runs fine there. RE_NOTES "Quest 3 crash".
+// Off on Virtual Desktop: it hooks the game's D3D11 work, and its hook crashed on a Quest 3 (freed pointer on the
+// game's render thread). Ori WotW VR, the same design without these queries, runs fine there. Found on a Quest 3 in testing.
 extern std::atomic<bool> g_gpuTiming;  // defined at the top
 static void GpuBegin() {
     if (!g_gameDev || !g_gpuTiming) return;
