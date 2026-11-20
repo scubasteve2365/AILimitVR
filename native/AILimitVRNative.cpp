@@ -52,7 +52,7 @@ struct Settings {
     int blockNetwork = 1;       // the game's internet connections are refused and logged
     float worldScale = 1.0f;    // game metres per real metre of head movement and eye gap (1 life size, higher: smaller world, more depth)
     int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
-    float lockOnLift = 0;       // lock-on marker raised by this many screen pixels
+    float lockOnLift = 150;     // lock-on marker raised by this many screen pixels (Steve's value, 2026-11-20)
     int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down (Steve, 2026-11-20)
 };
 static Settings g_set;
@@ -66,7 +66,7 @@ static void IniW(const wchar_t* sec, const wchar_t* key, float v) {
 }
 static void LoadSettings() {
     g_set.resolution = IniF(L"VR", L"Resolution", 0.95f);
-    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 0); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1);
+    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1);
     g_set.picture = (int)IniF(L"VR", L"Picture", 0);
     g_set.hudMode = (int)IniF(L"HUD", L"Mode", 0);
     g_set.hudWidth = IniF(L"HUD", L"Size", 1.85f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
