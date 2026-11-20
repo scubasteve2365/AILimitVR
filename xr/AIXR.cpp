@@ -695,7 +695,9 @@ static void XrThread() {
         XrCompositionLayerProjectionView pv[2];
         XrCompositionLayerQuad quads[2];
         const XrCompositionLayerBaseHeader* layers[3]; uint32_t nl = 0;
-        if (fs.shouldRender && g_shown) {
+        // Only pictures rendered from a real head pose: the first frames after VR starts can carry no pose (zero
+        // quaternion, zero field of view), which SteamVR refuses but Virtual Desktop may crash on.
+        if (fs.shouldRender && g_shown && g_shown->views.valid && g_shown->views.pose[0][6] * g_shown->views.pose[0][6] + g_shown->views.pose[0][3] * g_shown->views.pose[0][3] + g_shown->views.pose[0][4] * g_shown->views.pose[0][4] + g_shown->views.pose[0][5] * g_shown->views.pose[0][5] > 0.5f) {
             bool inside = g_layerInUse == 1;
             if (DrawEye(0, pv[0], inside) && DrawEye(1, pv[1], inside)) {
                 proj.space = g_space; proj.viewCount = 2; proj.views = pv; layers[nl++] = (XrCompositionLayerBaseHeader*)&proj;

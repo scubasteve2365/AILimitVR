@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.4.0"
-#define MOD_BUILD 4
+#define MOD_VERSION "0.4.1"
+#define MOD_BUILD 41
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -904,6 +904,48 @@ static DWORD WINAPI InitThread(void*) {
     return 0;
 }
 
+// ---------------------------------------------------------------- crash logging
+// A crash on a player's PC must leave its cause in AILimitVR.log: the faulting address as module+offset, the thread
+// (game, render or the mod's XR thread), and return addresses found on the stack. First 12 fatal exceptions only.
+// IL2CPP turns some access violations in GameAssembly into NullReferenceExceptions: those are logged but marked.
+#include <csignal>
+#include <exception>
+static std::string ModOff(uintptr_t a) {
+    HMODULE m = nullptr; char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) && m) {
+        GetModuleFileNameA(m, name, MAX_PATH);
+        const char* b = strrchr(name, '\\'); char o[MAX_PATH + 32]; sprintf_s(o, "%s+0x%llX", b ? b + 1 : name, (unsigned long long)(a - (uintptr_t)m)); return o;
+    }
+    char o[32]; sprintf_s(o, "0x%llX", (unsigned long long)a); return o;
+}
+static volatile LONG g_crashLogged = 0;
+static bool SafeRead(uintptr_t* p, uintptr_t* out) { __try { *out = *p; return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e) {
+    DWORD code = e->ExceptionRecord->ExceptionCode;
+    bool fatal = code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION || code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
+                 code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_PRIV_INSTRUCTION || code == 0xC0000409;
+    if (!fatal || InterlockedIncrement(&g_crashLogged) > 12) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t at = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
+    std::string where = ModOff(at);
+    char extra[96] = "";
+    if (code == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2)
+        sprintf_s(extra, ", %s address 0x%llX", e->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading", (unsigned long long)e->ExceptionRecord->ExceptionInformation[1]);
+    Log("CRASH exception 0x%08lX at %s%s, thread %lu%s", code, where.c_str(), extra, GetCurrentThreadId(),
+        where.rfind("GameAssembly", 0) == 0 ? " (inside the game: may be a NullReferenceException the game handles)" : "");
+    uintptr_t* sp = (uintptr_t*)e->ContextRecord->Rsp; std::string trail; int n = 0;
+    for (int i = 0; i < 512 && n < 14; i++) {
+        uintptr_t v = 0; if (!SafeRead(sp + i, &v)) break;
+        if (v < 0x10000) continue;
+        HMODULE m = nullptr;
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)v, &m) || !m) continue;
+        trail += " " + ModOff(v); n++;
+    }
+    Log("CRASH stack (return addresses found):%s", trail.c_str());
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void OnAbort(int) { Log("CRASH abort() called (a C++ runtime error), thread %lu", GetCurrentThreadId()); }
+static void OnTerminate() { Log("CRASH std::terminate (an uncaught C++ exception), thread %lu", GetCurrentThreadId()); abort(); }
+
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
@@ -917,6 +959,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         Log("SETTINGS resolution %.2f, picture %d, HUD mode %d size %.2f x %.2f y %.2f distance %.2f, menu size %.2f height %.2f distance %.2f, block network %d",
             g_set.resolution, g_set.picture, g_set.hudMode, g_set.hudWidth, g_set.hudX, g_set.hudY, g_set.hudDistance, g_set.menuSize, g_set.menuHeight, g_set.menuDistance, g_set.blockNetwork);
         aixr::SetLogger(&Log);
+        AddVectoredExceptionHandler(1, CrashHandler); signal(SIGABRT, OnAbort); std::set_terminate(OnTerminate);
         CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
     }
     return TRUE;
