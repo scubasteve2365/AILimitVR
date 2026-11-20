@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.4.1"
-#define MOD_BUILD 41
+#define MOD_VERSION "0.4.2"
+#define MOD_BUILD 42
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -918,6 +918,7 @@ static std::string ModOff(uintptr_t a) {
     }
     char o[32]; sprintf_s(o, "0x%llX", (unsigned long long)a); return o;
 }
+static void WriteDump(EXCEPTION_POINTERS* e);
 static volatile LONG g_crashLogged = 0;
 static bool SafeRead(uintptr_t* p, uintptr_t* out) { __try { *out = *p; return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
 static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e) {
@@ -941,8 +942,45 @@ static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e) {
         trail += " " + ModOff(v); n++;
     }
     Log("CRASH stack (return addresses found):%s", trail.c_str());
+    // Also name the modules loaded or unloaded near the faulting address (code in an unloaded module shows no name).
+    if (g_crashLogged == 1) WriteDump(e);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+// Crash dumps for the lab: our own minidump at the first fatal exception, and copies of Unity's crash dumps from
+// %TEMP%\SenseGames\AILIMIT\Crashes, both into AILimitVR\crashes in the game folder where the RigA watcher can read them.
+#include <dbghelp.h>
+static void WriteDump(EXCEPTION_POINTERS* e) {
+    HMODULE dh = LoadLibraryW(L"dbghelp.dll"); if (!dh) return;
+    typedef BOOL(WINAPI* MDW)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION, PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+    MDW w = (MDW)GetProcAddress(dh, "MiniDumpWriteDump"); if (!w) return;
+    std::wstring dir = g_gameDir + L"AILimitVR\\crashes\\"; CreateDirectoryW(dir.c_str(), nullptr);
+    SYSTEMTIME t; GetLocalTime(&t); wchar_t name[64];
+    swprintf_s(name, L"AILimitVR_%04d%02d%02d_%02d%02d%02d.dmp", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    HANDLE f = CreateFileW((dir + name).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    MINIDUMP_EXCEPTION_INFORMATION mei{GetCurrentThreadId(), e, FALSE};
+    BOOL ok = w(GetCurrentProcess(), GetCurrentProcessId(), f, (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules | MiniDumpWithIndirectlyReferencedMemory), &mei, nullptr, nullptr);
+    CloseHandle(f);
+    Log("CRASH minidump %s: AILimitVR\\crashes\\%ls", ok ? "written" : "FAILED", name);
+}
+static void CopyUnityCrashes() {
+    wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+    std::wstring root = std::wstring(tmp) + L"SenseGames\\AILIMIT\\Crashes\\";
+    std::wstring out = g_gameDir + L"AILimitVR\\crashes\\"; CreateDirectoryW(out.c_str(), nullptr);
+    WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"Crash_*").c_str(), &fd); int n = 0;
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        std::wstring d = root + fd.cFileName + L"\\";
+        std::wstring dst = out + fd.cFileName;
+        if (GetFileAttributesW((dst + L".dmp").c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        if (CopyFileW((d + L"crash.dmp").c_str(), (dst + L".dmp").c_str(), TRUE)) n++;
+        CopyFileW((d + L"error.log").c_str(), (dst + L"_error.log").c_str(), TRUE);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (n) Log("CRASH copied %d Unity crash dump(s) from %ls to AILimitVR\\crashes", n, root.c_str());
+}
+
 static void OnAbort(int) { Log("CRASH abort() called (a C++ runtime error), thread %lu", GetCurrentThreadId()); }
 static void OnTerminate() { Log("CRASH std::terminate (an uncaught C++ exception), thread %lu", GetCurrentThreadId()); abort(); }
 
@@ -959,6 +997,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         Log("SETTINGS resolution %.2f, picture %d, HUD mode %d size %.2f x %.2f y %.2f distance %.2f, menu size %.2f height %.2f distance %.2f, block network %d",
             g_set.resolution, g_set.picture, g_set.hudMode, g_set.hudWidth, g_set.hudX, g_set.hudY, g_set.hudDistance, g_set.menuSize, g_set.menuHeight, g_set.menuDistance, g_set.blockNetwork);
         aixr::SetLogger(&Log);
+        CopyUnityCrashes();
         AddVectoredExceptionHandler(1, CrashHandler); signal(SIGABRT, OnAbort); std::set_terminate(OnTerminate);
         CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
     }
