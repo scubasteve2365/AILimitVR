@@ -24,8 +24,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "0.4.2"
-#define MOD_BUILD 42
+#define MOD_VERSION "0.4.3"
+#define MOD_BUILD 43
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -719,6 +719,13 @@ static void FrameStart(int frame) {
     if ((g_framesSeen % 15) == 0) PollCommands();
     menu::Update(now);
     Periodic();
+    static bool flatChecked = false;
+    if (!flatChecked) {
+        // Lab test switch for RigA (one launch only): AILimitVR\test_flat.txt runs this launch without VR at all.
+        flatChecked = true;
+        std::wstring f = g_gameDir + L"AILimitVR\\test_flat.txt";
+        if (GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES) { DeleteFileW(f.c_str()); g_vrOn = false; Log("TEST this launch runs flat, no OpenXR at all (test_flat.txt found and removed)"); }
+    }
     if (!g_vrStarted && g_vrOn) {
         g_vrStarted = true;
         LogGameSet("at start");
@@ -931,10 +938,13 @@ static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e) {
     char extra[96] = "";
     if (code == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2)
         sprintf_s(extra, ", %s address 0x%llX", e->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading", (unsigned long long)e->ExceptionRecord->ExceptionInformation[1]);
+    char tname[96] = "?";
+    { PWSTR d = nullptr; if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &d)) && d) { sprintf_s(tname, "%ls", d); LocalFree(d); } }
+    Log("CRASH thread name \"%s\", rax 0x%llX, rcx 0x%llX, rdx 0x%llX", tname, (unsigned long long)e->ContextRecord->Rax, (unsigned long long)e->ContextRecord->Rcx, (unsigned long long)e->ContextRecord->Rdx);
     Log("CRASH exception 0x%08lX at %s%s, thread %lu%s", code, where.c_str(), extra, GetCurrentThreadId(),
         where.rfind("GameAssembly", 0) == 0 ? " (inside the game: may be a NullReferenceException the game handles)" : "");
     uintptr_t* sp = (uintptr_t*)e->ContextRecord->Rsp; std::string trail; int n = 0;
-    for (int i = 0; i < 512 && n < 14; i++) {
+    for (int i = 0; i < 2048 && n < 48; i++) {
         uintptr_t v = 0; if (!SafeRead(sp + i, &v)) break;
         if (v < 0x10000) continue;
         HMODULE m = nullptr;
