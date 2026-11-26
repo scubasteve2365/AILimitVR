@@ -25,8 +25,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "1.0.1"
-#define MOD_BUILD 11
+#define MOD_VERSION "1.0.2"
+#define MOD_BUILD 12
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -55,6 +55,7 @@ struct Settings {
     int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
     float lockOnLift = 150;     // lock-on marker raised by this many screen pixels (tested value, 2026-11-20)
     int menuSound = 1;          // 0 Off, 1 Low, 2 Medium, 3 High
+    int paceToHeadset = 1;      // 1: each game frame starts on the headset's frame tick; 0: the mod's own timer (builds before 1.0.2)
     int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down
 };
 static Settings g_set;
@@ -69,7 +70,7 @@ static void IniW(const wchar_t* sec, const wchar_t* key, float v) {
 }
 static void LoadSettings() {
     g_set.resolution = IniF(L"VR", L"Resolution", 0.95f);
-    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1); g_set.menuSound = (int)IniF(L"Menu", L"Sounds", 1);
+    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1); g_set.menuSound = (int)IniF(L"Menu", L"Sounds", 1); g_set.paceToHeadset = (int)IniF(L"VR", L"PaceToHeadset", 1);
     g_set.picture = (int)IniF(L"VR", L"Picture", 0);
     g_set.hudMode = (int)IniF(L"HUD", L"Mode", 0);
     g_set.hudWidth = IniF(L"HUD", L"Size", 1.85f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
@@ -285,6 +286,7 @@ static bool g_vrStarted = false;
 static double g_capNext = 0, g_capWaitSum = 0, g_capWaitMax = 0, g_hookCpuSum = 0, g_hookCpuMax = 0, g_lastFrameT = 0, g_frameMax = 0, g_frameSum = 0;
 static uint32_t g_capped = 0, g_late = 0, g_frames = 0;
 static double g_bestPeriod = 0, g_capPeriod = 0, g_lowSince = -1;
+static uint32_t g_tickTimeouts = 0;
 static double g_scanMsMax = 0;
 static uint32_t g_netBlocked = 0, g_netAllowed = 0;
 
@@ -524,6 +526,15 @@ static void Cap(double periodSec) {
         if (!smoothing && now - g_lowSince > 20 && fabs(g_capPeriod - periodSec) > 1e-5) { g_capPeriod = periodSec; g_bestPeriod = periodSec; Log("CAP the headset now runs at %.1f Hz steadily: cap follows", 1.0 / periodSec); }
     } else g_lowSince = -1;
     if (g_capPeriod <= 0) return;
+    if (g_set.paceToHeadset) {
+        // Locked to the headset: wait for its next frame tick, at most 1.5 periods (the game never waits longer).
+        double t0 = Now();
+        if (!aixr::WaitHeadsetTick(g_capPeriod * 1500)) g_tickTimeouts++;
+        double w = (Now() - t0) * 1000;
+        g_capWaitSum += w; if (w > g_capWaitMax) g_capWaitMax = w; g_capped++;
+        g_capNext = 0;
+        return;
+    }
     if (g_capNext == 0 || now - g_capNext > g_capPeriod) g_capNext = now;
     double t0 = now;
     while (Now() < g_capNext) { if (g_capNext - Now() > 0.0015) Sleep(1); else YieldProcessor(); }
@@ -597,9 +608,9 @@ static void Periodic() {
     if (g_vrStarted && fabs(speed - 1.0) > 0.05 && SF(mTimeScale) > 0.99) Log("SPEED WARNING: game time runs at %.2f of real time", speed);
     aixr::Stats s; aixr::TakeStats(&s);
     double cpu = g_frames ? (g_frameSum - g_capWaitSum) / g_frames : 0;
-    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f) | upscaler %s, resolution scale now %.2f",
+    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f) | upscaler %s, resolution scale now %.2f | pacing %s (tick timeouts %u)",
         frames ? dt * 1000 / frames : 0, g_frameMax, cpu, s.gpuMsAvg, s.gpuMsMax, s.gpuSamples, g_capped ? g_capWaitSum / g_capped : 0, g_capWaitMax,
-        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax, g_dlssStatus, DrsScale()); g_scanVolMax = g_scanCanvasMax = 0;
+        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax, g_dlssStatus, DrsScale(), g_set.paceToHeadset ? "headset tick" : "own timer", g_tickTimeouts); g_tickTimeouts = 0; g_scanVolMax = g_scanCanvasMax = 0;
     Log("XRSTAT state %d session %d focused %d, xr frames %u (no new image %u, layers sent %u), queued %u copied %u skipped busy %u no slot %u, copy max %.2f ms, xrWaitFrame avg %.2f max %.2f ms, xrEndFrame avg %.2f max %.2f ms, layer %d",
         aixr::GetState(), v.sessionState, v.focused, s.xrFrames, s.xrNoNewImage, s.layersSent, s.queued, s.copied, s.skippedBusy, s.skippedNoSlots, s.copyMsMax,
         s.waitMsAvg, s.waitMsMax, s.endMsAvg, s.endMsMax, aixr::LayerInUse());
@@ -633,6 +644,7 @@ static void PollCommands() {
         else if (c == "recenter") aixr::Recenter();
         else if (c == "gamesettings") LogGameSet("asked");
         else if (c == "dumpui") g_wantDumpUi = true;
+        else if (c == "pace") { int v; ls >> v; g_set.paceToHeadset = v; Log("PACE %s (lab)", v ? "locked to the headset's frame tick" : "the mod's own timer"); }
         else if (c == "pitch") { int v; ls >> v; g_set.decoupledPitch = v; Log("PITCH decoupled %d (lab)", v); }
         else if (c == "menu") { menu::g_open = !menu::g_open; Log("MENU %s (lab)", menu::g_open ? "opened" : "closed"); }
         else if (c == "hud") { int n; ls >> n; g_set.hudMode = n; menu::PushHud(); }

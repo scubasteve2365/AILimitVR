@@ -56,6 +56,10 @@ int RecommendedHeight() { return g_recH; }
 int LayerInUse() { return g_layerInUse; }
 int LastError() { return g_lastError; }
 void Recenter() { g_wantRecenter = true; }
+// Set once per headset frame, right after xrWaitFrame: the game starts each frame on the headset's own clock, so a
+// finished picture is always ready for the next headset frame (no repeat-then-skip from two clocks drifting).
+static HANDLE g_tickEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+bool WaitHeadsetTick(double timeoutMs) { return WaitForSingleObject(g_tickEvent, (DWORD)(timeoutMs < 1 ? 1 : timeoutMs)) == WAIT_OBJECT_0; }
 static bool IsVd() { return strstr(g_runtime, "VirtualDesktop") || strstr(g_runtime, "Virtual Desktop"); }
 void SetPicture(int picture) {
     g_picture = picture;
@@ -675,6 +679,7 @@ static void XrThread() {
         XrFrameState fs{XR_TYPE_FRAME_STATE};
         if (XR_FAILED(p_waitFrame(g_sess, nullptr, &fs))) { Sleep(1); continue; }
         double t1 = Ms();
+        SetEvent(g_tickEvent);
         p_beginFrame(g_sess, nullptr);
         XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
         XrViewState vs{XR_TYPE_VIEW_STATE};

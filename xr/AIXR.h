@@ -33,7 +33,9 @@ void Configure(int picture /*0 Auto, 1 Steady (projection), 2 Panel (quad)*/, fl
 int EyeWidth();                     // 0 until the ring is ready
 int EyeHeight();
 void SetHud(const Panel& p);        // live
-void SetPicture(int picture);       // live: 0 Auto, 1 Steady, 2 Panel
+void SetPicture(int picture);
+// Frame pacing: true once per headset frame, right after xrWaitFrame returns. Waits at most timeoutMs.
+bool WaitHeadsetTick(double timeoutMs);       // live: 0 Auto, 1 Steady, 2 Panel
 const char* LastErrorName();
 void Start();                       // starts the XR thread once
 int GetState();
