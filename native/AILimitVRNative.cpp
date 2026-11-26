@@ -25,8 +25,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "1.0"
-#define MOD_BUILD 10
+#define MOD_VERSION "1.0.1"
+#define MOD_BUILD 11
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -535,7 +535,7 @@ static void Cap(double periodSec) {
 // ---------------------------------------------------------------- scene scan: effects off, canvases to the HUD camera
 // Every 2 s while VR runs (scenes load new volumes and canvases). Its cost is logged (SCAN max ms).
 static std::set<Il2CppObject*> g_offComps;
-static const char* kOff[] = {"FilmGrain", "Bloom", "MotionBlur", "RadialBlur", "HBAO", "ScreenSpaceAmbientOcclusion", "ScreenSpaceReflection", "ChromaticAberration"};
+static const char* kOff[] = {"FilmGrain", "Bloom", "MotionBlur", "RadialBlur", "HBAO", "ScreenSpaceAmbientOcclusion", "ScreenSpaceReflection", "ChromaticAberration", "DepthOfField"};
 static double g_scanVolMax = 0, g_scanCanvasMax = 0;
 static void Scan(int part) {
     double t0 = Now();
