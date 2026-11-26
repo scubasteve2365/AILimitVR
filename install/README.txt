@@ -38,7 +38,7 @@ Game
 - Load best VR performance: lowest shadows and fog, ambient occlusion and motion blur off, DLSS on.
 Both buttons ask for a second press.
 
-While VR runs the mod keeps the game's VSync and frame lock off (it paces the game to your headset) and turns off film grain, bloom, motion blur, radial blur and ambient occlusion, which look wrong in VR.
+While VR runs the mod keeps the game's VSync and frame lock off (it starts each game frame on your headset's own frame tick) and turns off film grain, bloom, motion blur, radial blur, depth of field and ambient occlusion, which look wrong in VR.
 
 Uninstall
 Double click "Install AILimitVR.bat" and type 2. No game files are changed by this mod.
@@ -64,5 +64,5 @@ A Pimax Dream Air through SteamVR and a Meta Quest 3 through Virtual Desktop's V
 
 Support: https://buymeacoffee.com/scubasteve2365
 
-Version 1.0. Credits and licences are in THIRD-PARTY-NOTICES.txt. MIT licensed, by scubasteve2365.
+Version 1.0.2. Credits and licences are in THIRD-PARTY-NOTICES.txt. MIT licensed, by scubasteve2365.
 This is a fan mod, not made or approved by Sense Games or CE-Asia.

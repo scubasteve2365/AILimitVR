@@ -76,7 +76,7 @@ Hold both sticks in for half a second to open the menu in the headset, or press 
 
 ## Game settings
 
-While VR runs, the mod keeps the game's VSync and frame lock off, because it paces the game to your headset. It also turns off film grain, bloom, motion blur, the game's radial blur and ambient occlusion: they look wrong in VR or differ between the eyes.
+While VR runs, the mod keeps the game's VSync and frame lock off, because it paces the game to your headset. It starts each game frame on your headset's own frame tick, for even motion. It also turns off film grain, bloom, motion blur, the game's radial blur, depth of field and ambient occlusion: they look wrong in VR or differ between the eyes.
 
 ## Performance tips
 
