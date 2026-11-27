@@ -1,0 +1,18 @@
+# AI Limit VR 1.0.3 update ⚔️🥽
+**Free mod • OpenXR • Native stereo**
+
+A big fix-up for everything past the sewers:
+
+- **Both eyes match.** Buildings and shadows no longer look different in each eye outside the sewers.
+- **No more vanishing ground.** The ground and props used to pop in only when you were right next to them. New **Detail distance** setting in the menu: **Full** (default) matches the flat game, **Medium** and **Short** save a little CPU.
+- **Much lower CPU load.** About 25% less CPU time per frame in busy outdoor areas.
+- **Lock-on marker and item names** show at any distance.
+- **Honest frame reporting.** Late frames now show up in fpsVR and SteamVR's own stats, so you can tune your settings.
+
+**Tip:** resolution and DLSS only change GPU load. If fpsVR shows missed frames with your GPU well under budget, lower the game's shadow quality or set Detail distance to Medium.
+
+**Update:** unzip, run `Install AILimitVR.bat` and type `1`. It updates in place and keeps your settings.
+
+**Download:** https://github.com/scubasteve2365/AILimitVR/releases/tag/v1.0.3
+
+If you enjoy it, you can support more VR mods here ☕ <https://buymeacoffee.com/scubasteve2365>
