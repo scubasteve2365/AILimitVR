@@ -25,8 +25,8 @@
 #include "MinHook.h"
 #include "../xr/AIXR.h"
 
-#define MOD_VERSION "1.0.2"
-#define MOD_BUILD 12
+#define MOD_VERSION "1.0.3"
+#define MOD_BUILD 33
 
 // ---------------------------------------------------------------- log
 static std::wstring g_gameDir;
@@ -55,10 +55,20 @@ struct Settings {
     int upscaler = 3;           // 0 TAA, 1 DLAA, 2 DLSS Quality, 3 DLSS Balanced, 4 DLSS Performance, 5 DLSS Ultra Performance
     float lockOnLift = 150;     // lock-on marker raised by this many screen pixels (tested value, 2026-11-20)
     int menuSound = 1;          // 0 Off, 1 Low, 2 Medium, 3 High
+    int lodMatch = 1;           // Detail distance: 1 Full (eyes pick the same LOD as the flat game), 2 Medium, 0 Short (no scaling)
+    int visionToEye = 1;        // 1: the game's Vision culling groups use the left eye
+    int waterOnce = 0;          // lab: 1 = KWS water transforms update once per frame, not once per camera
+    int hlodUpdate = 1;         // 1: run the game's HLOD update for the game camera every frame
+    int eyeCulling = 1;         // 1: each eye culls with its own PerfectCullingCamera
     int paceToHeadset = 1;      // 1: each game frame starts on the headset's frame tick; 0: the mod's own timer (builds before 1.0.2)
     int decoupledPitch = 1;     // 1: the game camera's up/down tilt and roll do not tilt the view; the head looks up and down
 };
 static Settings g_set;
+static double g_cullSum, g_cullMax; static int g_cullCalls, g_waterSkipped;
+static double g_renderCpuSum, g_renderCpuMax;  // time inside HDRP's Render for the eyes (main thread)
+static float g_lodManual = 0, g_lodApplied = -1; static int g_lodChanges;  // eye LOD bias (see MatchEyeLod)
+static void* kPCC; static int oPccRadius = -1, oPccLayer = -1;
+static struct Il2CppObject* g_eyePcc[2];
 static int g_labCommands = 0;  // [Lab] Commands=1 in AILimitVR.ini turns the test command file on (off for players)
 static std::wstring IniPath() { return g_gameDir + L"AILimitVR\\AILimitVR.ini"; }
 static float IniF(const wchar_t* sec, const wchar_t* key, float def) {
@@ -70,7 +80,7 @@ static void IniW(const wchar_t* sec, const wchar_t* key, float v) {
 }
 static void LoadSettings() {
     g_set.resolution = IniF(L"VR", L"Resolution", 0.95f);
-    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1); g_set.menuSound = (int)IniF(L"Menu", L"Sounds", 1); g_set.paceToHeadset = (int)IniF(L"VR", L"PaceToHeadset", 1);
+    g_set.worldScale = IniF(L"VR", L"WorldScale", 1.0f); g_set.upscaler = (int)IniF(L"VR", L"Upscaler", 3); g_set.lockOnLift = IniF(L"HUD", L"LockOnLift", 150); g_set.decoupledPitch = (int)IniF(L"VR", L"DecoupledPitch", 1); g_set.menuSound = (int)IniF(L"Menu", L"Sounds", 1); g_set.paceToHeadset = (int)IniF(L"VR", L"PaceToHeadset", 1); g_set.eyeCulling = (int)IniF(L"VR", L"EyeCulling", 1); g_set.hlodUpdate = (int)IniF(L"VR", L"HlodUpdate", 1); g_set.visionToEye = (int)IniF(L"VR", L"VisionToEye", 1); g_set.lodMatch = (int)IniF(L"VR", L"LodMatch", 1); g_set.waterOnce = (int)IniF(L"VR", L"WaterOnce", 0); aixr::SetReportLate((int)IniF(L"VR", L"ReportLateFrames", 1), 0);
     g_set.picture = (int)IniF(L"VR", L"Picture", 0);
     g_set.hudMode = (int)IniF(L"HUD", L"Mode", 0);
     g_set.hudWidth = IniF(L"HUD", L"Size", 1.85f); g_set.hudX = IniF(L"HUD", L"X", 0.0f);
@@ -81,7 +91,7 @@ static void LoadSettings() {
 }
 static void SaveSettings() {
     IniW(L"VR", L"Resolution", g_set.resolution); IniW(L"VR", L"Picture", (float)g_set.picture);
-    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift); IniW(L"VR", L"DecoupledPitch", (float)g_set.decoupledPitch); IniW(L"Menu", L"Sounds", (float)g_set.menuSound);
+    IniW(L"VR", L"WorldScale", g_set.worldScale); IniW(L"VR", L"Upscaler", (float)g_set.upscaler); IniW(L"HUD", L"LockOnLift", g_set.lockOnLift); IniW(L"VR", L"DecoupledPitch", (float)g_set.decoupledPitch); IniW(L"Menu", L"Sounds", (float)g_set.menuSound); IniW(L"VR", L"LodMatch", (float)g_set.lodMatch);
     IniW(L"HUD", L"Mode", (float)g_set.hudMode); IniW(L"HUD", L"Size", g_set.hudWidth); IniW(L"HUD", L"X", g_set.hudX);
     IniW(L"HUD", L"Height", g_set.hudY); IniW(L"HUD", L"Distance", g_set.hudDistance);
     IniW(L"Menu", L"Size", g_set.menuSize); IniW(L"Menu", L"Height", g_set.menuHeight); IniW(L"Menu", L"Distance", g_set.menuDistance);
@@ -114,6 +124,8 @@ IL2CPP_FN(void*, il2cpp_class_get_field_from_name, (void*, const char*))
 IL2CPP_FN(size_t, il2cpp_field_get_offset, (void*))
 IL2CPP_FN(void, il2cpp_field_static_get_value, (void*, void*))
 IL2CPP_FN(uint32_t, il2cpp_gchandle_new, (Il2CppObject*, bool))
+IL2CPP_FN(void, il2cpp_gchandle_free, (uint32_t))
+IL2CPP_FN(Il2CppObject*, il2cpp_gchandle_get_target, (uint32_t))
 IL2CPP_FN(void*, il2cpp_class_get_parent, (void*))
 IL2CPP_FN(void, il2cpp_free, (void*))
 IL2CPP_FN(void*, il2cpp_class_get_type, (void*))
@@ -128,7 +140,7 @@ static bool BindIl2cpp() {
     B(il2cpp_domain_get) B(il2cpp_domain_get_assemblies) B(il2cpp_assembly_get_image) B(il2cpp_class_from_name)
     B(il2cpp_class_get_methods) B(il2cpp_method_get_name) B(il2cpp_method_get_param_count) B(il2cpp_method_get_param)
     B(il2cpp_type_get_name) B(il2cpp_resolve_icall) B(il2cpp_object_new) B(il2cpp_class_get_field_from_name) B(il2cpp_field_get_offset)
-    B(il2cpp_field_static_get_value) B(il2cpp_gchandle_new) B(il2cpp_class_get_parent) B(il2cpp_free)
+    B(il2cpp_field_static_get_value) B(il2cpp_gchandle_new) B(il2cpp_gchandle_free) B(il2cpp_gchandle_get_target) B(il2cpp_class_get_parent) B(il2cpp_free)
     B(il2cpp_class_get_type) B(il2cpp_type_get_object) B(il2cpp_object_get_class) B(il2cpp_class_get_name) B(il2cpp_string_new)
 #undef B
     return true;
@@ -177,7 +189,7 @@ static Il2CppObject* Keep(Il2CppObject* o) { if (o) il2cpp_gchandle_new(o, false
 
 // ---------------------------------------------------------------- game API (found by name in Setup)
 static void *kCamera, *kHDCam, *kCanvas, *kVolume, *kGameObject;
-static MethodInfo *mCamGetTarget, *mCamSetTarget, *mCamCopyFrom, *mCamSetProj, *mCamGetNear, *mCamGetFar, *mCamSetFov, *mCamSetAspect,
+static MethodInfo *mCamGetFov, *mCamGetTarget, *mCamSetTarget, *mCamCopyFrom, *mCamSetProj, *mCamGetNear, *mCamGetFar, *mCamSetFov, *mCamSetAspect,
     *mCamGetDepth, *mCamSetDepth, *mCamSetMask, *mCamSetClearFlags, *mCamSetBg, *mBehEnabled, *mBehSetEnabled, *mCompTransform, *mCompGet,
     *mTrPos, *mTrRot, *mTrSetPosRot, *mGoCtor, *mGoAdd, *mObjDontDestroy, *mObjFindAll, *mHDCopyTo, *mRTCtor, *mRTCreate, *mTexNative,
     *mCanvasMode, *mCanvasSetMode, *mCanvasSetCam, *mCanvasSetPlane, *mCanvasRoot, *mTimeTime, *mTimeScale, *mTimeFixedDelta,
@@ -608,20 +620,148 @@ static void Periodic() {
     if (g_vrStarted && fabs(speed - 1.0) > 0.05 && SF(mTimeScale) > 0.99) Log("SPEED WARNING: game time runs at %.2f of real time", speed);
     aixr::Stats s; aixr::TakeStats(&s);
     double cpu = g_frames ? (g_frameSum - g_capWaitSum) / g_frames : 0;
-    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f) | upscaler %s, resolution scale now %.2f | pacing %s (tick timeouts %u)",
+    Log("PERF frame avg %.2f ms max %.2f ms | CPU (frame minus cap wait) avg %.2f ms | GPU frame avg %.2f max %.2f ms (%u samples) | cap wait avg %.2f max %.2f ms | mod hook CPU avg %.2f max %.2f ms | HDRP render CPU (both eyes) avg %.2f max %.2f ms | culling avg %.2f ms per frame, %.1f calls, max call %.2f ms | %u eye frames, %u render calls, flat skipped %u, late %u | scan max %.2f ms (volumes %.2f, canvases %.2f) | upscaler %s, resolution scale now %.2f | pacing %s (tick timeouts %u)",
         frames ? dt * 1000 / frames : 0, g_frameMax, cpu, s.gpuMsAvg, s.gpuMsMax, s.gpuSamples, g_capped ? g_capWaitSum / g_capped : 0, g_capWaitMax,
-        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax, g_dlssStatus, DrsScale(), g_set.paceToHeadset ? "headset tick" : "own timer", g_tickTimeouts); g_tickTimeouts = 0; g_scanVolMax = g_scanCanvasMax = 0;
-    Log("XRSTAT state %d session %d focused %d, xr frames %u (no new image %u, layers sent %u), queued %u copied %u skipped busy %u no slot %u, copy max %.2f ms, xrWaitFrame avg %.2f max %.2f ms, xrEndFrame avg %.2f max %.2f ms, layer %d",
-        aixr::GetState(), v.sessionState, v.focused, s.xrFrames, s.xrNoNewImage, s.layersSent, s.queued, s.copied, s.skippedBusy, s.skippedNoSlots, s.copyMsMax,
+        g_eyeFrames ? g_hookCpuSum / g_eyeFrames : 0, g_hookCpuMax, g_eyeFrames ? g_renderCpuSum / g_eyeFrames : 0, g_renderCpuMax, g_eyeFrames ? g_cullSum / g_eyeFrames : 0, g_eyeFrames ? (double)g_cullCalls / g_eyeFrames : 0, g_cullMax, g_eyeFrames, g_renderCalls, g_flatSkipped, g_late, g_scanMsMax, g_scanVolMax, g_scanCanvasMax, g_dlssStatus, DrsScale(), g_set.paceToHeadset ? "headset tick" : "own timer", g_tickTimeouts); g_tickTimeouts = 0; g_scanVolMax = g_scanCanvasMax = 0;
+    Log("XRSTAT state %d session %d focused %d, xr frames %u (no new image %u, waited for the picture %u, sent late %u, layers sent %u), queued %u copied %u skipped busy %u no slot %u, copy max %.2f ms, xrWaitFrame avg %.2f max %.2f ms, xrEndFrame avg %.2f max %.2f ms, layer %d",
+        aixr::GetState(), v.sessionState, v.focused, s.xrFrames, s.xrNoNewImage, s.xrWaited, s.xrLateSent, s.layersSent, s.queued, s.copied, s.skippedBusy, s.skippedNoSlots, s.copyMsMax,
         s.waitMsAvg, s.waitMsMax, s.endMsAvg, s.endMsMax, aixr::LayerInUse());
     Log("INPUT pad reads %u, menu open %d, blocking the game %d | NET blocked %u allowed (local) %u | marker updates %u", menu::g_padReads, menu::g_open, menu::g_block, g_netBlocked, g_netAllowed, g_dealCalls); g_dealCalls = 0;
     menu::g_padReads = 0;
+    g_renderCpuSum = g_renderCpuMax = 0; g_cullSum = g_cullMax = 0; g_cullCalls = 0;
     g_capWaitSum = g_capWaitMax = g_hookCpuSum = g_hookCpuMax = g_frameMax = g_frameSum = g_scanMsMax = 0; g_capped = g_eyeFrames = g_renderCalls = g_flatSkipped = g_late = g_frames = 0;
     g_statT0 = t; g_statGame0 = game; g_statFrames0 = frame;
     if (g_vrStarted) KeepPacingOff("the game turned VSync or a frame cap on during VR. Turned off again: the mod paces the game");
 }
 
 
+// ---------------------------------------------------------------- lab diagnostics: eye-mismatch hunt
+static int oHdCustomFS = -1, oHdFS = -1, oHdFSMask = -1, oLightShadowMode = -1;
+static void* kHDLight;
+static void ForVolumeComps(const char* type, int active, bool listOnly) {
+    Il2CppObject* vm = P<Il2CppObject* (*)(MethodInfo*)>(mVolMgrInstance)(mVolMgrInstance);
+    Il2CppObject* vl = vm ? Fld<Il2CppObject*>(vm, oVolMgrVolumes) : nullptr; if (!vl) return;
+    Il2CppArray* vols = Fld<Il2CppArray*>(vl, oListItems); int nv = Fld<int>(vl, oListSize), hit = 0;
+    for (int i = 0; i < nv; i++) {
+        Il2CppObject* v = (Il2CppObject*)vols->data[i]; if (!v) continue;
+        Il2CppObject* prof = Fld<Il2CppObject*>(v, oVolProfile); if (!prof) continue;
+        Il2CppObject* list = Fld<Il2CppObject*>(prof, oProfComps); if (!list) continue;
+        Il2CppArray* items = Fld<Il2CppArray*>(list, oListItems); int n = Fld<int>(list, oListSize);
+        std::string names;
+        for (int k = 0; k < n; k++) {
+            Il2CppObject* c = (Il2CppObject*)items->data[k]; if (!c) continue;
+            const char* cn = ClassName(c);
+            if (listOnly) { names += std::string(cn) + (Fld<bool>(c, oCompActive) ? " " : "(off) "); continue; }
+            if (!strcmp(cn, type)) { Fld<bool>(c, oCompActive) = active != 0; hit++; }
+        }
+        if (listOnly) Log("VOLS \"%s\" %s: %s", Name(v).c_str(), Name(prof).c_str(), names.c_str());
+    }
+    if (!listOnly) Log("COMP %s set %d in %d place(s)", type, active, hit);
+}
+static void SetEyeFrameSetting(int bit, int on) {
+    for (int e = 0; e < 2; e++) {
+        if (!g_eyeCam[e]) continue;
+        Il2CppObject* hd = GetComp(g_eyeCam[e], kHDCam); if (!hd) continue;
+        Fld<bool>(hd, oHdCustomFS) = true;
+        uint64_t* data = (uint64_t*)((uint8_t*)hd + oHdFS); uint64_t* mask = (uint64_t*)((uint8_t*)hd + oHdFSMask);
+        mask[bit / 64] |= 1ull << (bit % 64);
+        if (on) data[bit / 64] |= 1ull << (bit % 64); else data[bit / 64] &= ~(1ull << (bit % 64));
+    }
+    Log("FS frame setting %d set %d on both eyes (custom frame settings)", bit, on);
+}
+// LOD bias on the eye cameras: frame settings LODBiasMode (field 60) and LODBias (61); mode 1 scales the quality setting.
+// Unity picks LOD levels (and culls the last one) from how tall an object looks on screen, using the camera's field of
+// view. The headset's view is far wider than the game's (about 100 vs 40 to 60 degrees tall), so every object looked
+// smaller and the game's ground and props dropped out until the player was right on top of them (Steve, 2026-11-26).
+// The eyes scale the LOD bias by tan(eye fov / 2) / tan(game fov / 2), so they pick the same detail as the flat game.
+
+static void SetEyeLodBias(float scale, bool log);
+static void MatchEyeLod(float eyeFovDeg, float gameFovDeg) {
+    float full = (gameFovDeg > 1 && eyeFovDeg > 1) ? tanf(eyeFovDeg * 0.5f * 0.0174533f) / tanf(gameFovDeg * 0.5f * 0.0174533f) : 1.0f;
+    float want = g_lodManual > 0 ? g_lodManual : g_set.lodMatch == 0 ? 1.0f : g_set.lodMatch == 2 ? 1.0f + (full - 1.0f) * 0.5f : full;
+    if (want < 1) want = 1; if (want > 8) want = 8;
+    if (g_lodApplied > 0 && fabsf(want - g_lodApplied) < 0.03f * g_lodApplied) return;
+    SetEyeLodBias(want, g_lodChanges++ < 5);
+    if (g_lodChanges <= 5) Log("LODBIAS eyes %.2f (eye fov %.1f, game fov %.1f, match %d, manual %.2f)", want, eyeFovDeg, gameFovDeg, g_set.lodMatch, g_lodManual);
+    g_lodApplied = want;
+}
+static void SetEyeLodBias(float scale, bool log) {
+    for (int e = 0; e < 2; e++) {
+        if (!g_eyeCam[e]) continue;
+        Il2CppObject* hd = GetComp(g_eyeCam[e], kHDCam); if (!hd) continue;
+        Fld<bool>(hd, oHdCustomFS) = true;
+        uint8_t* fs = (uint8_t*)hd + oHdFS; uint64_t* mask = (uint64_t*)((uint8_t*)hd + oHdFSMask);
+        mask[0] |= (1ull << 60) | (1ull << 61); fs[0] |= 0; ((uint64_t*)fs)[0] |= (1ull << 60) | (1ull << 61);
+        *(float*)(fs + 0x10) = scale; *(int*)(fs + 0x14) = 1;
+    }
+    if (!log) return;
+    MethodInfo* q = FindMethod(FindClass("UnityEngine", "QualitySettings"), "get_lodBias", 0);
+    Log("LODBIAS eyes scale %.2f (quality lodBias %.2f)", scale, q ? P<float (*)(MethodInfo*)>(q)(q) : -1.0f);
+}
+// The HUD camera only draws the game's UI canvases, but as an HDRP camera it ran the whole lighting pipeline every frame
+// (shadow maps, decals, volumetrics, reflections, ...). Custom frame settings switch those off for it alone.
+static const int kHudOffBits[] = {20, 21, 34, 22, 12, 96, 23, 94, 24, 95, 46, 26, 27, 28, 29, 30, 33, 35, 37, 79, 13, 14, 67, 10, 11, 16, 8, 9, 18, 1, 127, 6};
+static int g_hudLite = -1;
+static void SetHudLite(int on) {
+    if (!g_hudCam) return;
+    Il2CppObject* hd = GetComp(g_hudCam, kHDCam); if (!hd) return;
+    uint64_t* data = (uint64_t*)((uint8_t*)hd + oHdFS); uint64_t* mask = (uint64_t*)((uint8_t*)hd + oHdFSMask);
+    Fld<bool>(hd, oHdCustomFS) = on != 0;
+    for (int b : kHudOffBits) { mask[b / 64] |= 1ull << (b % 64); data[b / 64] &= ~(1ull << (b % 64)); }
+    g_hudLite = on;
+    Log("HUDLITE HUD camera lighting pipeline %s (%d frame settings)", on ? "off" : "back to defaults", (int)(sizeof kHudOffBits / sizeof kHudOffBits[0]));
+}
+// HUD camera depth: the game puts screen-space markers (lock-on orb, item names) at z = their distance in metres, so the
+// projection needs a far plane well past any of them. Culling uses its own matrix: a 10-unit-deep box, so the HUD
+// camera does not test the whole world (0.9 ms on RigB).
+static void SetHudDepth(float farZ, float cullFar) {
+    if (!g_hudCam) return;
+    MethodInfo* getCull = FindMethod(kCamera, "get_cullingMatrix", 0); MethodInfo* setCull = FindMethod(kCamera, "set_cullingMatrix", 1);
+    MethodInfo* resetCull = FindMethod(kCamera, "ResetCullingMatrix", 0);
+    if (!getCull || !setCull || !resetCull) { SetIF(mCamSetFar, g_hudCam, farZ); Log("HUDDEPTH culling matrix methods missing: far %.0f", farZ); return; }
+    P<void (*)(Il2CppObject*, MethodInfo*)>(resetCull)(g_hudCam, resetCull);
+    SetIF(mCamSetFar, g_hudCam, cullFar);
+    Mat4 cm = P<Mat4 (*)(Il2CppObject*, MethodInfo*)>(getCull)(g_hudCam, getCull);
+    SetIF(mCamSetFar, g_hudCam, farZ);
+    if (cullFar < farZ) P<void (*)(Il2CppObject*, Mat4, MethodInfo*)>(setCull)(g_hudCam, cm, setCull);
+    Log("HUDDEPTH HUD camera far plane %.0f, culling depth %.0f", farZ, cullFar);
+}
+static void ListLights() {
+    if (!kHDLight) return;
+    Il2CppArray* ls = FindAll(kHDLight); int n = ls ? (int)ls->max_length : 0;
+    int modes[3] = {0, 0, 0};
+    for (int i = 0; i < n; i++) { Il2CppObject* l = (Il2CppObject*)ls->data[i]; if (!l) continue; int m = Fld<int>(l, oLightShadowMode); if (m >= 0 && m < 3) modes[m]++; }
+    Log("LIGHTS %d HD lights: shadow update EveryFrame %d, OnEnable %d, OnDemand %d", n, modes[0], modes[1], modes[2]);
+}
+
+// Shared shadow maps: HDRP draws every shadow-casting light's shadow map once per camera, so twice per frame in VR.
+// Lights switched to OnDemand keep their map in HDRP's cache; asking for one update per frame draws it for the left eye
+// and the right eye reuses it (the eyes are 6 cm apart). Lab test first (command shadows 0/1).
+static std::vector<uint32_t> g_shLights; static MethodInfo *mLightSetMode, *mLightRequest; static int g_shareShadows;
+static bool Alive(Il2CppObject* o) { return o && *(void**)((uint8_t*)o + 0x10) != nullptr; }  // UnityEngine.Object.m_CachedPtr
+static void ShareShadows(int on) {
+    if (!kHDLight || !mLightSetMode || !mLightRequest) { Log("SHADOWS share: methods missing"); return; }
+    for (uint32_t h : g_shLights) { Il2CppObject* l = il2cpp_gchandle_get_target(h); if (Alive(l)) P<void (*)(Il2CppObject*, int, MethodInfo*)>(mLightSetMode)(l, 0, mLightSetMode); il2cpp_gchandle_free(h); }
+    g_shLights.clear(); g_shareShadows = on;
+    if (!on) { Log("SHADOWS share off: every light draws its shadow per eye again"); return; }
+    Il2CppArray* ls = FindAll(kHDLight); int n = ls ? (int)ls->max_length : 0;
+    for (int i = 0; i < n; i++) {
+        Il2CppObject* l = (Il2CppObject*)ls->data[i];
+        if (!Alive(l) || Fld<int>(l, oLightShadowMode) != 0) continue;
+        P<void (*)(Il2CppObject*, int, MethodInfo*)>(mLightSetMode)(l, 2, mLightSetMode);
+        g_shLights.push_back(il2cpp_gchandle_new(l, false));
+    }
+    Log("SHADOWS share on: %d of %d lights now draw their shadow once per frame", (int)g_shLights.size(), n);
+}
+static void RequestSharedShadows() {
+    if (!g_shareShadows) return;
+    for (uint32_t h : g_shLights) { Il2CppObject* l = il2cpp_gchandle_get_target(h); if (Alive(l)) P<void (*)(Il2CppObject*, MethodInfo*)>(mLightRequest)(l, mLightRequest); }
+}
+
+#ifdef AILVR_PROFILER  // lab-only sampling profiler: build with -DAILVR_PROFILER=ON; never in hand-off or release builds
+#include "Prof.inc"
+#endif
+static void UpdateVision(bool log);
 static void PollCommands() {
     if (!g_labCommands) return;
     std::wstring path = g_gameDir + L"vrlab_command.txt";
@@ -644,6 +784,41 @@ static void PollCommands() {
         else if (c == "recenter") aixr::Recenter();
         else if (c == "gamesettings") LogGameSet("asked");
         else if (c == "dumpui") g_wantDumpUi = true;
+        else if (c == "vols") ForVolumeComps("", 0, true);
+        else if (c == "comp") { std::string t; int v = 0; ls >> t >> v; ForVolumeComps(t.c_str(), v, false); }
+        else if (c == "fs") { int b = 0, v = 0; ls >> b >> v; SetEyeFrameSetting(b, v); }
+        else if (c == "lights") ListLights();
+        else if (c == "huddepth") { float f = 100000, cf = 10; ls >> f >> cf; SetHudDepth(f, cf); }
+        else if (c == "water") { int v = 1; ls >> v; g_set.waterOnce = v; Log("WATER once per frame %d (skipped so far %d)", v, g_waterSkipped); }
+        else if (c == "hudfar") { float v = 100000; ls >> v; if (g_hudCam) SetIF(mCamSetFar, g_hudCam, v); Log("HUDFAR %.1f", v); }
+#ifdef AILVR_PROFILER
+        else if (c == "prof") { double sec = 10; ls >> sec; StartProfile(sec); }
+#endif
+        else if (c == "hudlite") { int v = 1; ls >> v; SetHudLite(v); }
+        else if (c == "shadows") { int v = 1; ls >> v; ShareShadows(v); }
+        else if (c == "late") { int v = 1; double w = 0; ls >> v >> w; aixr::SetReportLate(v, w); Log("LATE report late frames %d, on-time window %.1f ms (0 = period minus 3)", v, w); }
+        else if (c == "lodbias") { float v = 0; ls >> v; g_lodManual = v; Log("LODBIAS manual %.2f (0 = match the flat view)", v); if (v > 0) SetEyeLodBias(v, true); else g_lodApplied = -1; }
+        else if (c == "vision") { int v = -1; ls >> v; if (v >= 0) g_set.visionToEye = v; Log("VISION to eye %d", g_set.visionToEye); UpdateVision(true); }
+        else if (c == "hlod") { int v = 1; ls >> v; g_set.hlodUpdate = v; Log("HLOD update %d", v); }
+        else if (c == "camcomp" && g_gameCam) {
+            std::string cls; int v = 1; ls >> cls >> v;
+            Il2CppObject* go = GetObj(mCompGO, g_gameCam);
+            MethodInfo* m = FindMethod(kGameObject, "GetComponents", 1, "System.Type"); MethodInfo* en = FindMethod(FindClass("UnityEngine", "Behaviour"), "set_enabled", 1);
+            Il2CppArray* arr = m ? P<Il2CppArray* (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(m)(go, TypeOf(FindClass("UnityEngine", "Component")), m) : nullptr;
+            int hit = 0; for (uintptr_t i = 0; arr && i < arr->max_length; i++) { Il2CppObject* cmp = (Il2CppObject*)arr->data[i]; if (!strcmp(ClassName(cmp), cls.c_str())) { SetIB(en, cmp, v != 0); hit++; } }
+            Log("CAMCOMP %s enabled %d (%d found)", cls.c_str(), v, hit); }
+        else if (c == "camcomps" && g_gameCam) {
+            Il2CppObject* go = GetObj(mCompGO, g_gameCam);
+            MethodInfo* m = FindMethod(kGameObject, "GetComponents", 1, "System.Type");
+            Il2CppArray* arr = m ? P<Il2CppArray* (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(m)(go, TypeOf(FindClass("UnityEngine", "Component")), m) : nullptr;
+            std::string names; for (uintptr_t i = 0; arr && i < arr->max_length; i++) { names += ClassName((Il2CppObject*)arr->data[i]); names += " "; }
+            Log("CAMCOMPS game camera \"%s\": %s", Name(go).c_str(), names.c_str()); }
+        else if (c == "pcc") { int v = 1; ls >> v; MethodInfo* m = FindMethod(FindClass("UnityEngine", "Behaviour"), "set_enabled", 1);
+            for (int e = 0; e < 2; e++) if (g_eyePcc[e] && m) SetIB(m, g_eyePcc[e], v != 0);
+            Log("CULLING eye PerfectCullingCameras enabled %d", v); }
+        else if (c == "occl") { int v = 1; ls >> v; MethodInfo* m = FindMethod(kCamera, "set_useOcclusionCulling", 1); MethodInfo* g = FindMethod(kCamera, "get_useOcclusionCulling", 0);
+            for (int e = 0; e < 2; e++) if (g_eyeCam[e] && m) SetIB(m, g_eyeCam[e], v != 0);
+            Log("OCCL eye cameras occlusion culling %d (game camera has %d)", v, (g && g_gameCam) ? (int)IB(g, g_gameCam) : -1); }
         else if (c == "pace") { int v; ls >> v; g_set.paceToHeadset = v; Log("PACE %s (lab)", v ? "locked to the headset's frame tick" : "the mod's own timer"); }
         else if (c == "pitch") { int v; ls >> v; g_set.decoupledPitch = v; Log("PITCH decoupled %d (lab)", v); }
         else if (c == "menu") { menu::g_open = !menu::g_open; Log("MENU %s (lab)", menu::g_open ? "opened" : "closed"); }
@@ -672,9 +847,97 @@ static Quat QMul(Quat a, Quat b) {
             a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
 }
 
+// The game culls with Koenigz Perfect Culling: a PerfectCullingCamera on the game camera hides and shows renderers in
+// its own begin-camera-rendering step. VR leaves the game camera out, so without this the eyes saw whatever state was
+// left over, different per eye (different detail and shadows per eye: Steve, 2026-11-26). Each eye gets its own
+// PerfectCullingCamera with the game camera's settings, so each eye culls for itself before it renders.
+
+
+static void AddEyeCulling(Il2CppObject* game) {
+    if (!kPCC) return;
+    Il2CppObject* src = GetComp(game, kPCC);
+    if (!src) { Log("CULLING the game camera has no PerfectCullingCamera"); return; }
+    for (int e = 0; e < 2; e++) {
+        if (!g_eyePcc[e]) {
+            Il2CppObject* go = GetObj(mCompGO, g_eyeCam[e]);
+            g_eyePcc[e] = AddComp(go, kPCC);
+        }
+        if (g_eyePcc[e]) { Fld<int>(g_eyePcc[e], oPccRadius) = Fld<int>(src, oPccRadius); Fld<Il2CppObject*>(g_eyePcc[e], oPccLayer) = Fld<Il2CppObject*>(src, oPccLayer); }
+    }
+    Log("CULLING each eye has its own PerfectCullingCamera (radius %d, layer %s)", Fld<int>(src, oPccRadius), Name(Fld<Il2CppObject*>(src, oPccLayer)).c_str());
+}
+
+// The game's world uses Unity's HLOD system: far buildings are merged low-detail meshes that HLODManager swaps for the
+// real ones in its begin-camera-rendering step, but only for the active HLOD camera (the game camera). VR leaves the game
+// camera out of the render, so the swap never ran and the eyes saw a stale mix of low and high detail meshes, different
+// per eye (Steve, 2026-11-26, outside the sewer). We run the same update once per frame for the game camera.
+static void* kHlodMgr; static MethodInfo *mHlodInst, *mHlodPreCull;
+static int g_hlodCalls;
+static void UpdateHlod() {
+    if (!g_set.hlodUpdate || !mHlodInst || !mHlodPreCull || !g_gameCam) return;
+    Il2CppObject* mgr = P<Il2CppObject* (*)(MethodInfo*)>(mHlodInst)(mHlodInst);
+    if (!mgr) return;
+    P<void (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(mHlodPreCull)(mgr, g_gameCam, mHlodPreCull);
+    if (g_hlodCalls++ == 0) Log("HLOD first update for the game camera");
+}
+
+// The game also hides and shows objects with MackySoft Vision: CullingGroupProxy wraps a Unity CullingGroup whose
+// visibility is worked out only while its target camera (the game camera) culls. VR leaves the game camera out, so
+// visibility never updated and things stayed hidden until the player got close (Steve, 2026-11-26: ground missing
+// until you touch it). Each group's target camera is set to the left eye, which culls every frame.
+static void* kVisionGroup; static MethodInfo *mVisionGetCam, *mVisionSetCam; static void* fVisionGroups;
+static int oVisionTargets = -1;
+static void UpdateVision(bool log) {
+    if (!kVisionGroup || !fVisionGroups || !mVisionGetCam || !mVisionSetCam) return;
+    Il2CppArray* groups = nullptr; il2cpp_field_static_get_value(fVisionGroups, &groups);
+    if (!groups) return;
+    Il2CppObject* want = g_set.visionToEye && g_eyeCam[0] ? g_eyeCam[0] : g_gameCam;
+    for (uintptr_t i = 0; i < groups->max_length; i++) {
+        Il2CppObject* g = (Il2CppObject*)groups->data[i]; if (!g) continue;
+        Il2CppObject* cam = GetObj(mVisionGetCam, g);
+        Il2CppObject* list = oVisionTargets >= 0 ? Fld<Il2CppObject*>(g, oVisionTargets) : nullptr;
+        if (log) Log("VISION group %d \"%s\" camera %s, %d targets", (int)i, Name(g).c_str(), cam == g_eyeCam[0] ? "left eye" : cam == g_gameCam ? "game camera" : Name(cam).c_str(), list ? Fld<int>(list, oListSize) : -1);
+        if (want && cam != want && (cam == g_gameCam || cam == g_eyeCam[0] || !cam)) {
+            P<void (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(mVisionSetCam)(g, want, mVisionSetCam);
+            Log("VISION group %d target camera set to %s", (int)i, want == g_eyeCam[0] ? "the left eye" : "the game camera");
+        }
+    }
+}
+
+// HLODManager also runs its update from beginCameraRendering for EVERY camera that renders: the left eye, the right eye
+// and our HUD camera (which sits far away at the HUD's pixel coordinates). Each call re-evaluated and switched the
+// whole HLOD tree for that camera: about 3 ms of main thread per frame on RigB (profile 2026-11-27) and renderers
+// flipping between the cameras. While VR runs, our cameras are ignored; UpdateHlod runs it once per frame for the game
+// camera instead.
+typedef void (*HlodPreCull_t)(Il2CppObject* self, void* ctx, Il2CppObject* cam, MethodInfo* m);
+static HlodPreCull_t oHlodPreCull; static int g_hlodSkipped;
+static void hkHlodPreCull(Il2CppObject* self, void* ctx, Il2CppObject* cam, MethodInfo* m) {
+    if (g_set.hlodUpdate && cam && (cam == g_eyeCam[0] || cam == g_eyeCam[1] || cam == g_hudCam)) { g_hlodSkipped++; return; }
+    oHlodPreCull(self, ctx, cam, m);
+}
+
+// KWS water: WaterSystem.UpdateWaterTransformsData runs from every camera's begin-camera-rendering (left, right, HUD),
+// about 1 ms per frame on RigB. The transforms do not depend on the camera, so each water instance does it once per
+// game frame.
+typedef void (*WaterUpd_t)(Il2CppObject* self, MethodInfo* m);
+static WaterUpd_t oWaterUpd; static Il2CppObject* g_waterSeen[64]; static int g_waterFrame[64];
+static int g_curFrame;
+static void hkWaterUpd(Il2CppObject* self, MethodInfo* m) {
+    if (g_set.waterOnce && g_vrOn) {
+        int slot = -1;
+        for (int i = 0; i < 64; i++) { if (g_waterSeen[i] == self) { slot = i; break; } if (!g_waterSeen[i] && slot < 0) slot = i; }
+        if (slot >= 0) {
+            if (g_waterSeen[slot] == self && g_waterFrame[slot] == g_curFrame) { g_waterSkipped++; return; }
+            g_waterSeen[slot] = self; g_waterFrame[slot] = g_curFrame;
+        }
+    }
+    oWaterUpd(self, m);
+}
+
 static aixr::Views g_usedViews;
 static void CopyGameCamera(Il2CppObject* game) {
     Il2CppObject* ghd = GetComp(game, kHDCam);
+    g_lodApplied = -1;  // CopyTo resets the eyes' frame settings: apply the LOD bias again
     for (int e = 0; e < 2; e++) {
         P<void (*)(Il2CppObject*, Il2CppObject*, MethodInfo*)>(mCamCopyFrom)(g_eyeCam[e], game, mCamCopyFrom);
         SetIO(mCamSetTarget, g_eyeCam[e], g_eyeRT[e]);
@@ -692,6 +955,7 @@ static void MakeEyes(Il2CppObject* game) {
         g_eyeCam[e] = AddComp(go, kCamera); AddComp(go, kHDCam);
     }
     CopyGameCamera(game);
+    if (g_set.eyeCulling) AddEyeCulling(game);
     ApplyUpscaler("start");
     // HUD camera: renders the game's overlay canvases (layer 5, UI) into a see-through texture; no volumes, no AA.
     g_hudRT = MakeRT(kHudW, kHudH, "AILVR_HUD");
@@ -706,8 +970,12 @@ static void MakeEyes(Il2CppObject* game) {
     // makes world units equal screen pixels, so those elements and the normal layout both land where the game meant.
     P<void (*)(Il2CppObject*, bool, MethodInfo*)>(mCamSetOrtho)(g_hudCam, true, mCamSetOrtho);
     SetIF(mCamSetOrthoSize, g_hudCam, kHudH * 0.5f);
+    // Draws to 100000 (markers sit at z = their distance in metres), culls only 10 deep (SetHudDepth): build 30 cut the
+    // far plane to 10 and markers farther than 10 m vanished (Steve, 2026-11-27).
     SetIF(mCamSetNear, g_hudCam, 0.01f); SetIF(mCamSetFar, g_hudCam, 100000.0f);
     P<void (*)(Il2CppObject*, Vec3, Quat, MethodInfo*)>(mTrSetPosRot)(Transform(g_hudCam), Vec3{kHudW * 0.5f, kHudH * 0.5f, -1.0f}, Quat{0, 0, 0, 1}, mTrSetPosRot);
+    SetHudLite(1);
+    SetHudDepth(100000.0f, 10.0f);
     Log("EYES two eye cameras %dx%d and the HUD camera %dx%d made (HUD camera orthographic, 1 unit = 1 screen pixel)", g_eyeW, g_eyeH, kHudW, kHudH);
 }
 
@@ -742,7 +1010,18 @@ static void PoseEyes(Il2CppObject* game) {
         P<void (*)(Il2CppObject*, Mat4, MethodInfo*)>(mCamSetProj)(g_eyeCam[e], Projection(fv, n, f), mCamSetProj);
         SetIF(mCamSetFov, g_eyeCam[e], (fv[2] - fv[3]) * 57.29578f);
         SetIF(mCamSetAspect, g_eyeCam[e], (tanf(fv[1]) - tanf(fv[0])) / (tanf(fv[2]) - tanf(fv[3])));
+        if (e == 0 && mCamGetFov) MatchEyeLod((fv[2] - fv[3]) * 57.29578f, P<float (*)(Il2CppObject*, MethodInfo*)>(mCamGetFov)(game, mCamGetFov));
     }
+}
+
+// ScriptableRenderContext.Cull: timed (lab) to see how much of the eyes' render time is culling.
+struct CullRes { void* ptr; void* alloc; };
+typedef CullRes* (*Cull_t)(CullRes* ret, void* self, void* params, MethodInfo* m);
+static Cull_t oCull;
+static CullRes* hkCull(CullRes* ret, void* self, void* params, MethodInfo* m) {
+    double t = Now(); CullRes* r = oCull(ret, self, params, m); double ms = (Now() - t) * 1000;
+    g_cullSum += ms; if (ms > g_cullMax) g_cullMax = ms; g_cullCalls++;
+    return r;
 }
 
 // HDRenderPipeline.Render(ScriptableRenderContext, List<Camera>)
@@ -752,8 +1031,12 @@ static void FrameStart(int frame);
 
 static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodInfo* m) {
     g_renderCalls++;
+#ifdef AILVR_PROFILER
+    g_mainTid = GetCurrentThreadId();
+#endif
     int frame = SI(mTimeFrame);
     if (frame != g_lastFrame) { g_lastFrame = frame; FrameStart(frame); }
+    g_curFrame = frame;
     bool vrRunning = g_vrOn && aixr::GetState() == aixr::Running && aixr::EyeWidth() > 0;
     static bool listChecked = false;
     if (!listChecked && cams) {
@@ -778,10 +1061,10 @@ static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodIn
     }
     if (game) {
         if (!g_eyeCam[0]) MakeEyes(game);
-        else if (game != g_gameCam) { CopyGameCamera(game); ApplyUpscaler("game camera changed"); }
+        else if (game != g_gameCam) { CopyGameCamera(game); if (g_set.eyeCulling) AddEyeCulling(game); ApplyUpscaler("game camera changed"); }
         g_gameCam = game;
     }
-    if (g_gameCam && g_posedFrame != frame) { g_posedFrame = frame; PoseEyes(g_gameCam); }
+    if (g_gameCam && g_posedFrame != frame) { g_posedFrame = frame; PoseEyes(g_gameCam); RequestSharedShadows(); if (!g_flatToo) UpdateHlod(); if (frame % 30 == 0) UpdateVision(false); }
     // Leave the game's own flat render out while VR runs.
     bool removed = false;
     if (gameIdx >= 0 && !g_flatToo) {
@@ -811,6 +1094,7 @@ static void hkRender(Il2CppObject* self, void* ctx, Il2CppObject* cams, MethodIn
         }
     }
     double ms = ((mid - t0) + (Now() - t1)) * 1000;  // the mod's own CPU time in this hook (not the game's render)
+    double rms = (t1 - mid) * 1000; g_renderCpuSum += rms; if (rms > g_renderCpuMax) g_renderCpuMax = rms;
     g_hookCpuSum += ms; if (ms > g_hookCpuMax) g_hookCpuMax = ms;
 }
 
@@ -959,7 +1243,7 @@ static void Setup() {
     mCamGetTarget = Need(kCamera, "Camera", "get_targetTexture", 0); mCamSetTarget = Need(kCamera, "Camera", "set_targetTexture", 1);
     mCamCopyFrom = Need(kCamera, "Camera", "CopyFrom", 1); mCamSetProj = Need(kCamera, "Camera", "set_projectionMatrix", 1);
     mCamGetNear = Need(kCamera, "Camera", "get_nearClipPlane", 0); mCamGetFar = Need(kCamera, "Camera", "get_farClipPlane", 0);
-    mCamSetFov = Need(kCamera, "Camera", "set_fieldOfView", 1); mCamSetAspect = Need(kCamera, "Camera", "set_aspect", 1);
+    mCamSetFov = Need(kCamera, "Camera", "set_fieldOfView", 1); mCamGetFov = FindMethod(kCamera, "get_fieldOfView", 0); mCamSetAspect = Need(kCamera, "Camera", "set_aspect", 1);
     mCamGetDepth = Need(kCamera, "Camera", "get_depth", 0); mCamSetDepth = Need(kCamera, "Camera", "set_depth", 1);
     mCamSetMask = Need(kCamera, "Camera", "set_cullingMask", 1); mCamSetClearFlags = Need(kCamera, "Camera", "set_clearFlags", 1);
     mCamSetBg = Need(kCamera, "Camera", "set_backgroundColor", 1);
@@ -992,6 +1276,25 @@ static void Setup() {
     mCanvasGetCam = Need(kCanvas, "Canvas", "get_worldCamera", 0); mCanvasOrder = Need(kCanvas, "Canvas", "get_sortingOrder", 0);
     kCPV = FindClass("UnityEngine.Rendering.HighDefinition", "CustomPassVolume");
     mObjInstantiate = Need(kObj, "Object", "Instantiate", 1, "UnityEngine.Object");
+    oHdCustomFS = NeedField(kHDCam, "HDAdditionalCameraData", "customRenderingSettings");
+    oHdFS = NeedField(kHDCam, "HDAdditionalCameraData", "m_RenderingPathCustomFrameSettings");
+    oHdFSMask = NeedField(kHDCam, "HDAdditionalCameraData", "renderingPathCustomFrameSettingsOverrideMask");
+    kHDLight = FindClass("UnityEngine.Rendering.HighDefinition", "HDAdditionalLightData");
+    if (kHDLight) { mLightSetMode = FindMethod(kHDLight, "set_shadowUpdateMode", 1); mLightRequest = FindMethod(kHDLight, "RequestShadowMapRendering", 0); }
+    kPCC = FindClass("Koenigz.PerfectCulling", "PerfectCullingCamera");
+    kVisionGroup = FindClass("MackySoft.Vision", "CullingGroupProxy");
+    if (kVisionGroup) { mVisionGetCam = FindMethod(kVisionGroup, "get_TargetCamera", 0); mVisionSetCam = FindMethod(kVisionGroup, "set_TargetCamera", 1);
+        fVisionGroups = il2cpp_class_get_field_from_name(kVisionGroup, "m_Groups"); void* ft = il2cpp_class_get_field_from_name(kVisionGroup, "m_Targets"); if (ft) oVisionTargets = (int)il2cpp_field_get_offset(ft); }
+    Log("VISION CullingGroupProxy %s, camera get/set %s/%s, groups field %s", kVisionGroup ? "found" : "MISSING", mVisionGetCam ? "ok" : "MISSING", mVisionSetCam ? "ok" : "MISSING", fVisionGroups ? "ok" : "MISSING");
+    { void* kWater = FindClass("KWS", "WaterSystem"); if (!kWater) kWater = FindClass("", "WaterSystem");
+      MethodInfo* mw = kWater ? FindMethod(kWater, "UpdateWaterTransformsData", 0) : nullptr;
+      if (mw) Hook(mw, (void*)&hkWaterUpd, (void**)&oWaterUpd, "KWS WaterSystem.UpdateWaterTransformsData: once per frame"); else Log("HOOKMAP KWS WaterSystem not found (no water hook)"); }
+    kHlodMgr = FindClass("Unity.HLODSystem", "HLODManager");
+    if (kHlodMgr) { mHlodInst = FindMethod(kHlodMgr, "get_Instance", 0); mHlodPreCull = FindMethod(kHlodMgr, "OnPreCull", 1); }
+    if (kHlodMgr) { MethodInfo* m2 = FindMethod(kHlodMgr, "OnPreCull", 2); if (m2) Hook(m2, (void*)&hkHlodPreCull, (void**)&oHlodPreCull, "HLODManager.OnPreCull(context, camera): skip our cameras"); }
+    Log("HLOD manager %s, Instance %s, OnPreCull(Camera) %s", kHlodMgr ? "found" : "MISSING", mHlodInst ? "ok" : "MISSING", mHlodPreCull ? "ok" : "MISSING");
+    oPccRadius = NeedField(kPCC, "PerfectCullingCamera", "NeighborCellIncludeRadius"); oPccLayer = NeedField(kPCC, "PerfectCullingCamera", "visibilityLayer");
+    oLightShadowMode = NeedField(kHDLight, "HDAdditionalLightData", "m_ShadowUpdateMode");
     mGoInParent = Need(kGameObject, "GameObject", "GetComponentInParent", 1, "System.Type");
     mTrSetPos = Need(kTr, "Transform", "set_position", 1); mCamSetAllowDyn = Need(kCamera, "Camera", "set_allowDynamicResolution", 1);
     oHdAllowDyn = NeedField(kHDCam, "HDAdditionalCameraData", "allowDynamicResolution"); oHdAllowDlss = NeedField(kHDCam, "HDAdditionalCameraData", "allowDeepLearningSuperSampling");
@@ -1051,6 +1354,7 @@ static void Setup() {
     if (g_missing) Log("HOOKMAP %d item(s) not found: VR stays off", g_missing);
     if (g_missing || !g_issue || !mRender) { g_vrOn = false; return; }
     Hook(mRender, (void*)&hkRender, (void**)&oRender, "HDRenderPipeline.Render(List<Camera>)");
+    // ScriptableRenderContext.Cull timing hook: froze the game on the first frame (build 24, signature not right); off.
     Hook(Need(kGlobal, "Global", "DealTargetPoint", 0), (void*)&hkDeal, (void**)&oDeal, "Global.DealTargetPoint (lock-on marker height)");
 }
 

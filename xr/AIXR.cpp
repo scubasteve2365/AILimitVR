@@ -56,6 +56,8 @@ int RecommendedHeight() { return g_recH; }
 int LayerInUse() { return g_layerInUse; }
 int LastError() { return g_lastError; }
 void Recenter() { g_wantRecenter = true; }
+static std::atomic<int> g_reportLate{1}; static std::atomic<double> g_onTimeMs{0};
+void SetReportLate(int on, double onTimeMs) { g_reportLate = on; g_onTimeMs = onTimeMs; }
 // Set once per headset frame, right after xrWaitFrame: the game starts each frame on the headset's own clock, so a
 // finished picture is always ready for the next headset frame (no repeat-then-skip from two clocks drifting).
 static HANDLE g_tickEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -138,6 +140,7 @@ struct Slot {
 };
 static Slot g_slots[kSlots];
 static std::atomic<uint64_t> g_seq{0};
+static HANDLE g_newImage = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // set when the game side writes a slot
 
 static bool CreateDeviceForRuntime(const LUID& want) {
     IDXGIFactory1* f = nullptr;
@@ -487,6 +490,7 @@ static void __stdcall OnRenderEvent(int id) {
     best->views = p.views;
     best->seq = ++g_seq;
     for (int e = 0; e < kTex; e++) best->gameMx[e]->ReleaseSync(1);
+    SetEvent(g_newImage);
     GpuEnd();
     double ms = Ms() - t0;
     std::lock_guard<std::mutex> sl(g_statMx); g_stats.copied++; if (ms > g_stats.copyMsMax) g_stats.copyMsMax = ms;
@@ -713,6 +717,22 @@ static void XrThread() {
             }
         }
         bool fresh = TakeNewest() != nullptr;
+        // No new picture yet: wait for it rather than repeat the last one. Within the on-time window this only lines
+        // up the hand-over; past it the picture goes in late and the runtime counts a missed frame, as it should
+        // (Steve, 2026-11-27: repeats hid the misses from SteamVR and fpsVR). Loading screens etc: give up after 2.5
+        // periods and repeat, so the runtime never starves.
+        bool waited = false, late = false;
+        if (!fresh && g_reportLate && g_shown && running) {
+            double period = fs.predictedDisplayPeriod / 1e6; if (period < 5 || period > 40) period = 13.9;
+            double onTime = g_onTimeMs > 0 ? (double)g_onTimeMs : period - 3.0; if (onTime < 2) onTime = 2;
+            double cap = period * 2.5;
+            waited = true;
+            while (!fresh && Ms() - t1 < cap) {
+                WaitForSingleObject(g_newImage, 1);
+                fresh = TakeNewest() != nullptr;
+            }
+            late = fresh && Ms() - t1 > onTime;
+        }
         // Panels: the HUD (Fixed in the room at recenter, or held in front of the head), the menu (in the room).
         Panel hud; { std::lock_guard<std::mutex> lk(g_hudMx); hud = g_hud; }
         g_hudShow = hud.mode != 2;
@@ -748,7 +768,7 @@ static void XrThread() {
         p_endFrame(g_sess, &fe);
         double t3 = Ms();
         std::lock_guard<std::mutex> sl(g_statMx);
-        g_stats.xrFrames++; if (!fresh) g_stats.xrNoNewImage++; if (nl) g_stats.layersSent++;
+        g_stats.xrFrames++; if (!fresh) g_stats.xrNoNewImage++; if (nl) g_stats.layersSent++; if (waited) g_stats.xrWaited++; if (late) g_stats.xrLateSent++;
         double w = t1 - t0, en = t3 - t2;
         g_waitSum += w; g_endSum += en; g_timed++;
         if (w > g_stats.waitMsMax) g_stats.waitMsMax = w; if (en > g_stats.endMsMax) g_stats.endMsMax = en;

@@ -25,6 +25,7 @@ General
 - Recenter: puts the view, the HUD and the menu in front of you again. Your headset's own recenter does the same.
 - World scale: 1.00 is life size. Higher makes the world smaller with more 3D depth.
 - Decoupled pitch: On keeps the world level; look up and down with your head. Off tilts the view with the game's camera.
+- Detail distance: Full (default) keeps the same detail, ground and props at distance as the flat game. Medium and Short drop them sooner and save a little CPU time.
 - Upscaler: TAA, DLAA, or DLSS Quality, Balanced (default), Performance, Ultra Performance, in each eye.
 - Resolution: 100% is the size your headset asks for. Takes effect the next time you start the game.
 - Picture: Auto (recommended) uses Steady on Virtual Desktop and Panel on SteamVR. Steady draws the HUD and menu into the 3D picture, which holds still on Virtual Desktop. Panel shows them as separate sharp panels, best on SteamVR.
@@ -47,6 +48,7 @@ Performance tips
 - SteamVR: in Settings, Video, Per-application video settings, set the game's Throttling Behavior to Fixed at your refresh rate, and Motion Smoothing off.
 - DLSS Balanced holds 72 Hz on an RTX 5090 at a high SteamVR resolution. Lower the Upscaler step or the Resolution if your card struggles.
 - Game speed is correct at 72, 90 and 120 Hz.
+- Resolution and DLSS change graphics card load only. If fpsVR shows missed frames with the graphics card well under budget, the CPU is the limit: lower the game's shadow quality, or set Detail distance to Medium.
 
 Good to know
 - The mod keeps the game offline: it refuses the game's internet connections.
@@ -64,5 +66,5 @@ A Pimax Dream Air through SteamVR and a Meta Quest 3 through Virtual Desktop's V
 
 Support: https://buymeacoffee.com/scubasteve2365
 
-Version 1.0.2. Credits and licences are in THIRD-PARTY-NOTICES.txt. MIT licensed, by scubasteve2365.
+Version 1.0.3. Credits and licences are in THIRD-PARTY-NOTICES.txt. MIT licensed, by scubasteve2365.
 This is a fan mod, not made or approved by Sense Games or CE-Asia.

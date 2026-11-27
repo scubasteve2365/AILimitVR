@@ -31,6 +31,7 @@ static void Build() {
             {"World scale", Value, "How big the world feels. 1.00 is life size. Higher makes the world smaller with more 3D depth; lower makes it bigger and flatter. Applies at once."},
             {"Upscaler", Value, nullptr},
             {"Decoupled pitch", Value, "On: the world stays level. Tilting the camera up or down with the stick (or lock-on) no longer tilts your view; look up and down with your head. Off: the view tilts with the game's camera, as in the flat game. Applies at once."},
+            {"Detail distance", Value, "How far away the game keeps full detail and small objects. Full matches the flat game. The headset's wide view makes things look smaller to the game, so lower settings drop ground, props and detail sooner. Medium and Short save some CPU time. Applies at once."},
             {"Resolution", Value, nullptr},
             {"Picture", Value, nullptr},
             {"Close menu", Button, "Closes the mod menu. Insert or both sticks held also close it."}}},
@@ -65,6 +66,7 @@ static void ValueText(const char* label, char* out, size_t n) {
     else if (l == "HUD distance") sprintf_s(out, n, "%.2f m", g_set.hudDistance);
     else if (l == "World scale") sprintf_s(out, n, "%.2f", g_set.worldScale);
     else if (l == "Decoupled pitch") sprintf_s(out, n, "%s", g_set.decoupledPitch ? "On" : "Off");
+    else if (l == "Detail distance") sprintf_s(out, n, "%s", g_set.lodMatch == 0 ? "Short" : g_set.lodMatch == 2 ? "Medium" : "Full");
     else if (l == "Upscaler") { static const char* u[] = {"TAA", "DLAA", "DLSS Quality", "DLSS Balanced", "DLSS Performance", "DLSS Ultra Perf"}; sprintf_s(out, n, "%s", u[g_set.upscaler % 6]); }
     else if (l == "Lock-on marker height") sprintf_s(out, n, "%+d px", (int)g_set.lockOnLift);
     else if (l == "Menu size") sprintf_s(out, n, "%d%%", (int)lroundf(g_set.menuSize * 100));
@@ -94,6 +96,7 @@ static void ChangeValue(const char* label, int dir) {
     else if (l == "HUD distance") g_set.hudDistance = Clamp(g_set.hudDistance + dir * 0.05f, 0.4f, 5.0f);
     else if (l == "World scale") { float st = g_set.worldScale + dir * 0.01f >= 2.0f ? 0.25f : 0.05f; g_set.worldScale = Clamp(roundf((g_set.worldScale + dir * st) * 100) / 100, 0.25f, 10.0f); }
     else if (l == "Decoupled pitch") g_set.decoupledPitch = !g_set.decoupledPitch;
+    else if (l == "Detail distance") { static const int order[3] = {0, 2, 1}; int i = g_set.lodMatch == 0 ? 0 : g_set.lodMatch == 2 ? 1 : 2; i = (int)Clamp((float)(i + dir), 0, 2); g_set.lodMatch = order[i]; g_lodApplied = -1; }
     else if (l == "Upscaler") { g_set.upscaler = (g_set.upscaler + 6 + dir) % 6; ApplyUpscaler("menu"); }
     else if (l == "Lock-on marker height") g_set.lockOnLift = Clamp(g_set.lockOnLift + dir * 5, -300, 300);
     else if (l == "Menu size") g_set.menuSize = Clamp(roundf((g_set.menuSize + dir * 0.05f) * 20) / 20, 0.5f, 2.0f);

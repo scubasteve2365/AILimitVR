@@ -43,6 +43,7 @@ Hold both sticks in for half a second to open the menu in the headset, or press 
 | World scale | 1.00 is life size. Higher makes the world smaller with more 3D depth |
 | Upscaler | TAA, DLAA, or DLSS Quality, Balanced (default), Performance or Ultra Performance in each eye. Applies at once |
 | Decoupled pitch | On (default) keeps the world level: the stick and lock-on no longer tilt your view, you look up and down with your head. Off tilts the view with the game's camera |
+| Detail distance | Full (default) keeps the same detail, ground and props at distance as the flat game. Medium and Short drop them sooner and save a little CPU time |
 | Resolution | 100% is the size your headset asks for. Takes effect the next time you start the game |
 | Picture | Auto (recommended) uses Steady on Virtual Desktop and Panel on SteamVR. Steady draws the HUD and menu into the 3D picture, which holds still on Virtual Desktop. Panel shows them as separate sharp panels, best on SteamVR |
 
@@ -83,6 +84,8 @@ While VR runs, the mod keeps the game's VSync and frame lock off, because it pac
 - **SteamVR throttling first.** In SteamVR Settings, Video, Per-application video settings, pick the game and set **Throttling Behavior** to **Fixed** at your headset's refresh rate, and turn **Motion Smoothing** off.
 - **DLSS Balanced** held 72 Hz on an RTX 5090 at a high SteamVR resolution. If your card struggles, try DLSS Performance or lower the Resolution.
 - Game speed is correct at 72, 90 and 120 Hz.
+- **Resolution and DLSS change graphics card load only.** If fpsVR shows missed frames with the graphics card well under budget, the CPU is the limit: lower the game's shadow quality, or set Detail distance to Medium.
+- Frames the game finishes late are handed to SteamVR late rather than covered up, so fpsVR and other tools show them honestly.
 
 ## Good to know
 

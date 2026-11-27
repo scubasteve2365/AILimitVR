@@ -18,6 +18,10 @@ add_library(AILimitVRNative SHARED native/AILimitVRNative.cpp xr/AIXR.cpp xr/Men
     ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
 target_include_directories(AILimitVRNative PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends ${OPENXR_DIR}/include)
 target_compile_definitions(AILimitVRNative PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+option(AILVR_PROFILER "Lab-only sampling profiler (never in hand-off or release builds)" OFF)
+if(AILVR_PROFILER)
+  target_compile_definitions(AILimitVRNative PRIVATE AILVR_PROFILER)
+endif()
 target_link_libraries(AILimitVRNative PRIVATE minhook d3d11 dxgi winmm ws2_32)
 add_custom_command(TARGET AILimitVRNative POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${OPENXR_DIR}/x64/bin/openxr_loader.dll" "${OUT}/openxr_loader.dll")

@@ -56,10 +56,14 @@ void Shutdown();
 void SnapComposed(const char* path);  // lab: next composed left-eye image to a raw file
 
 struct Stats {
-    uint32_t queued, copied, skippedBusy, skippedNoSlots, xrFrames, xrNoNewImage, layersSent, gpuSamples;
+    uint32_t queued, copied, skippedBusy, skippedNoSlots, xrFrames, xrNoNewImage, layersSent, gpuSamples, xrWaited, xrLateSent;
     double waitMsAvg, waitMsMax, endMsAvg, endMsMax, copyMsMax, gpuMsAvg, gpuMsMax;
 };
-void TakeStats(Stats* out);         // returns counters since the last call and resets them
+void TakeStats(Stats* out);
+// 1 (default): when the game's picture is late, wait for it and submit it late, so the runtime (SteamVR, fpsVR) sees
+// and reports the missed frame. 0: repeat the last picture on time (hides misses). onTimeMs: how long after
+// xrWaitFrame a picture still counts as on time (0 = period minus 3 ms).
+void SetReportLate(int on, double onTimeMs);         // returns counters since the last call and resets them
 
 // ------------------------------------------------------------------------------------------------ mod menu panel
 // The menu's content is built on the game's main thread (native\Menu.inc) and handed over as a snapshot; the XR thread
